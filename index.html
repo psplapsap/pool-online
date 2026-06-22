@@ -258,7 +258,11 @@ document.getElementById('btnJoin').onclick = () => {
     conn = peer.connect('pool8-' + code, { reliable: true });
     wireConn();
     let connected = false;
-    conn.on('open', () => { connected = true; setStatus('Connected! You are Player 2.'); });
+    conn.on('open', () => {
+      connected = true;
+      setStatus('Connected! You are Player 2.');
+      startGame();            // unhide HUD/help on the guest too (host's state streams in next)
+    });
     // if the host id doesn't exist / unreachable, PeerJS emits an error on peer
     setTimeout(() => { if (!connected) setStatus('Still trying… check the code is exactly right and the host has the page open.'); }, 8000);
   });
@@ -296,16 +300,15 @@ function sendState(){
   if (role !== 'host' || !conn || !conn.open) return;
   conn.send({ t:'state', s: G });
 }
-// Throttled streaming used during physics sim: cap at ~30Hz so we don't flood
-// the data channel with a full snapshot every animation frame.
-let _lastStream = 0, _frameCtr = 0;
+// Stream ball positions to the guest during physics sim. A full snapshot is only
+// ~1KB for 16 balls, so at 60fps that's ~60KB/s — trivial for a WebRTC data channel,
+// and sending every frame keeps the guest's animation perfectly smooth (throttling
+// made remote balls look like they teleported).
 function streamState(){
   if (role !== 'host' || !conn || !conn.open) return;
-  _frameCtr++;
-  if (_frameCtr % 2 !== 0) return;   // send every 2nd frame (~30Hz at 60fps)
   conn.send({ t:'state', s: G });
 }
-function applyState(s){ G = s; renderHud(); }
+function applyState(s){ G = s; startGame(); renderHud(); }  // startGame() is idempotent; guarantees the guest's HUD is visible once state arrives
 
 function startGame(){
   document.getElementById('lobby').classList.add('hidden');
@@ -736,7 +739,7 @@ function loop(){
       streamState();            // stream positions to guest (throttled)
       if (!moving) resolveShot();
     }
-    if (role === 'host') renderHud();  // host keeps its own HUD in sync (guest updates via applyState)
+    renderHud();   // keep both players' HUD (turn pills, message, "your shot") live every frame
     draw();
   }
   requestAnimationFrame(loop);
