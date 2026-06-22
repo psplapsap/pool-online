@@ -1,0 +1,4 @@
+node_modules/
+*.log
+smoke-result.json
+smoke-trace.log

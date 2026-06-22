@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>8-Ball Pool — Online (P2P)</title>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<style>
+  :root { --felt:#0b6b3a; --felt2:#0a5e33; --wood:#5a3a1b; --gold:#d9b35c; }
+  * { box-sizing: border-box; }
+  html,body { margin:0; height:100%; background:#15110d; color:#eee;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:14px; }
+  h1 { margin:4px 0; font-size:20px; letter-spacing:.5px; }
+  h1 span { color:var(--gold); }
+  #lobby { background:#221a12; border:1px solid #3a2c1c; border-radius:12px;
+    padding:18px 20px; max-width:520px; width:100%; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+  button { background:var(--gold); color:#211; border:none; border-radius:8px;
+    padding:9px 14px; font-weight:700; cursor:pointer; font-size:14px; }
+  button:hover { filter:brightness(1.08); }
+  button.secondary { background:#3a2c1c; color:#f1e6d2; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  input { background:#15100b; border:1px solid #4a3826; color:#fff; border-radius:8px;
+    padding:9px 12px; font-size:15px; letter-spacing:2px; text-transform:uppercase; width:140px; }
+  .muted { color:#b8a98f; font-size:13px; }
+  code { background:#15100b; padding:2px 8px; border-radius:6px; color:var(--gold);
+    font-size:18px; letter-spacing:3px; user-select:all; }
+  #status { font-size:13px; color:#b8a98f; min-height:18px; }
+  #hud { display:flex; gap:18px; align-items:center; font-size:14px; flex-wrap:wrap;
+    justify-content:center; }
+  .pill { background:#221a12; border:1px solid #3a2c1c; border-radius:20px; padding:6px 14px; }
+  .you { color:var(--gold); font-weight:700; }
+  #turnmsg { font-weight:700; }
+  canvas { background:var(--felt); border-radius:14px; touch-action:none;
+    box-shadow:0 0 0 16px var(--wood), 0 0 0 18px #2a1a0c, 0 18px 40px rgba(0,0,0,.6); }
+  .hidden { display:none !important; }
+  .grp { display:inline-flex; gap:4px; align-items:center; }
+  .dot { width:14px; height:14px; border-radius:50%; display:inline-block; border:1px solid #0006; }
+  #help { max-width:760px; font-size:12.5px; color:#9c8f78; line-height:1.5; text-align:center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>🎱 8-Ball Pool <span>· Online</span></h1>
+
+  <div id="lobby">
+    <div class="row">
+      <button id="btnCreate">Create room</button>
+      <span class="muted">— get a code, share it in Discord</span>
+    </div>
+    <div class="row">
+      <input id="codeIn" placeholder="CODE" maxlength="6" autocomplete="off" />
+      <button id="btnJoin" class="secondary">Join room</button>
+    </div>
+    <div class="row" id="codeBox" style="display:none">
+      <span class="muted">Your room code:</span> <code id="myCode">…</code>
+      <button id="btnCopy" class="secondary" style="padding:6px 10px">Copy</button>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div id="hud" class="hidden">
+    <div class="pill" id="p1pill">P1 <span class="grp" id="p1grp"></span></div>
+    <div class="pill"><span id="turnmsg">…</span></div>
+    <div class="pill" id="p2pill">P2 <span class="grp" id="p2grp"></span></div>
+  </div>
+
+  <canvas id="cv" width="900" height="500"></canvas>
+
+  <div id="help" class="hidden">
+    Aim with the mouse · click-drag back from the cue ball to set power, release to shoot ·
+    on a foul the other player gets <b>ball-in-hand</b> (click an empty spot to place the cue ball).
+    Pot the 8-ball last to win — pot it early or scratch on it and you lose.
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   8-Ball Pool — peer-to-peer.
+   Host = authoritative simulator. Guest = thin client (sends input, renders state).
+   Networking via PeerJS data channel; signaling through the free PeerJS broker.
+   ========================================================================= */
+
+// ---------- constants ----------
+const W = 900, H = 500;
+const RAIL = 36;                 // playable inset from canvas edge to cushion
+const R = 11;                    // ball radius
+const POCKET = 19;               // pocket capture radius
+const FRICTION = 0.988;          // per-frame velocity damping
+const STOP = 0.05;               // speed below which a ball is considered stopped
+const MAX_POWER = 17;            // max launch speed
+const SUBSTEPS = 3;              // physics substeps per frame for stability
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+// pocket centers (4 corners + 2 sides)
+const POCKETS = [
+  {x:RAIL, y:RAIL}, {x:W/2, y:RAIL-6}, {x:W-RAIL, y:RAIL},
+  {x:RAIL, y:H-RAIL}, {x:W/2, y:H-RAIL+6}, {x:W-RAIL, y:H-RAIL},
+];
+
+// ball colors by number (1-7 solid, 8 black, 9-15 stripe of same base hue)
+const BALLCOL = {
+  1:'#f5c518', 2:'#1f4fd8', 3:'#e0322b', 4:'#5b2d8e', 5:'#e67414',
+  6:'#1f8a4c', 7:'#7a1f2b', 8:'#111111',
+  9:'#f5c518', 10:'#1f4fd8', 11:'#e0322b', 12:'#5b2d8e', 13:'#e67414',
+  14:'#1f8a4c', 15:'#7a1f2b'
+};
+const isStripe = n => n >= 9 && n <= 15;
+
+// ---------- game state ----------
+let G = null;            // authoritative game object (host owns; guest mirrors a render copy)
+let role = null;         // 'host' | 'guest'
+let myPlayer = 0;        // 0 = player1, 1 = player2  (host is P1, guest is P2)
+let conn = null, peer = null;
+let aim = { active:false, angle:0, power:0, dragging:false };
+let ballInHandPlacing = false;
+
+function freshState() {
+  const balls = [];
+  // cue ball
+  balls.push({ n:0, x:W*0.25, y:H/2, vx:0, vy:0, alive:true });
+  // rack the 15 on the right (triangle), 8 in the middle
+  const apexX = W*0.68, apexY = H/2, gap = R*2 + 0.5;
+  const order = [1,9,2,10,8,3,11,4,12,5,13,6,14,7,15]; // 8 lands center-ish
+  let idx = 0;
+  for (let col=0; col<5; col++) {
+    for (let row=0; row<=col; row++) {
+      const n = order[idx++];
+      const x = apexX + col * (gap*0.87);
+      const y = apexY + (row - col/2) * gap;
+      balls.push({ n, x, y, vx:0, vy:0, alive:true });
+    }
+  }
+  return {
+    balls,
+    turn: 0,                 // whose turn (0/1)
+    phase: 'aim',            // 'aim' | 'sim' | 'over'
+    broken: false,
+    open: true,              // groups not yet assigned
+    groups: [null, null],    // 'solid'|'stripe' per player
+    ballInHand: false,
+    message: 'Break!',
+    winner: null,
+    // per-shot bookkeeping (host only)
+    shot: null,
+  };
+}
+
+// =========================================================================
+// NETWORKING
+// =========================================================================
+const statusEl = document.getElementById('status');
+function setStatus(t){ statusEl.textContent = t; }
+
+function randCode(){
+  const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s=''; for(let i=0;i<4;i++) s+=c[Math.floor(Math.random()*c.length)];
+  return s;
+}
+
+// Shared PeerJS options. STUN servers help two players behind home routers
+// (NAT) establish a direct WebRTC link. The signaling still goes through the
+// default free PeerJS broker — if that broker is blocked (e.g. a corporate
+// network), peer.on('open') never fires and we surface a clear warning.
+const PEER_OPTS = {
+  debug: 1,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
+    ],
+  },
+};
+
+let _brokerTimer = null;
+function watchBroker(){
+  // If the broker doesn't open within 12s, tell the user what's wrong.
+  _brokerTimer = setTimeout(() => {
+    setStatus('⚠ Can\'t reach the matchmaking server (it may be blocked on this network — '
+      + 'try a home/personal network or a VPN). Your game code/connection can\'t be set up here.');
+  }, 12000);
+}
+function brokerOpened(){ if (_brokerTimer){ clearTimeout(_brokerTimer); _brokerTimer=null; } }
+
+document.getElementById('btnCreate').onclick = () => {
+  role = 'host'; myPlayer = 0;
+  const code = randCode();
+  setStatus('Setting up room…');
+  watchBroker();
+  peer = new Peer('pool8-' + code, PEER_OPTS);
+  peer.on('open', () => {
+    brokerOpened();
+    document.getElementById('myCode').textContent = code;
+    document.getElementById('codeBox').style.display = 'flex';
+    setStatus('Room created. Share the code in Discord and wait for your opponent…');
+  });
+  peer.on('error', e => {
+    brokerOpened();
+    if (e.type === 'unavailable-id') setStatus('That room code is taken — click Create again for a new one.');
+    else setStatus('Error: ' + e.type + ' — try a new room.');
+  });
+  peer.on('connection', c => {
+    conn = c;
+    wireConn();
+    conn.on('open', () => {
+      setStatus('Opponent connected! You are Player 1 (host).');
+      G = freshState();
+      startGame();
+      sendState();
+    });
+  });
+};
+
+document.getElementById('btnJoin').onclick = () => {
+  const code = document.getElementById('codeIn').value.trim().toUpperCase();
+  if (code.length < 3) { setStatus('Enter the room code first.'); return; }
+  role = 'guest'; myPlayer = 1;
+  setStatus('Connecting…');
+  watchBroker();
+  peer = new Peer(PEER_OPTS);
+  peer.on('open', () => {
+    brokerOpened();
+    setStatus('Reaching host…');
+    conn = peer.connect('pool8-' + code, { reliable: true });
+    wireConn();
+    let connected = false;
+    conn.on('open', () => { connected = true; setStatus('Connected! You are Player 2.'); });
+    // if the host id doesn't exist / unreachable, PeerJS emits an error on peer
+    setTimeout(() => { if (!connected) setStatus('Still trying… check the code is exactly right and the host has the page open.'); }, 8000);
+  });
+  peer.on('error', e => {
+    brokerOpened();
+    if (e.type === 'peer-unavailable') setStatus('No room with that code — check it and that the host\'s page is open.');
+    else setStatus('Error: ' + e.type + ' — check the code.');
+  });
+};
+
+document.getElementById('btnCopy').onclick = () => {
+  navigator.clipboard?.writeText(document.getElementById('myCode').textContent);
+  setStatus('Code copied — paste it in Discord.');
+};
+
+function wireConn(){
+  conn.on('data', onData);
+  conn.on('close', () => setStatus('Opponent disconnected.'));
+}
+
+// Host receives guest input; guest receives state snapshots.
+function onData(msg){
+  if (role === 'host') {
+    // All messages here originate from the guest, who is always Player 1.
+    if (msg.t === 'shot')      hostHandleShot(msg.angle, msg.power, 1);
+    else if (msg.t === 'place') hostHandlePlace(msg.x, msg.y, 1);
+    else if (msg.t === 'aim')   { G._guestAim = msg; } // for spectating opponent's aim
+  } else {
+    if (msg.t === 'state') { applyState(msg.s); }
+  }
+}
+
+function sendState(){
+  if (role !== 'host' || !conn || !conn.open) return;
+  conn.send({ t:'state', s: G });
+}
+// Throttled streaming used during physics sim: cap at ~30Hz so we don't flood
+// the data channel with a full snapshot every animation frame.
+let _lastStream = 0, _frameCtr = 0;
+function streamState(){
+  if (role !== 'host' || !conn || !conn.open) return;
+  _frameCtr++;
+  if (_frameCtr % 2 !== 0) return;   // send every 2nd frame (~30Hz at 60fps)
+  conn.send({ t:'state', s: G });
+}
+function applyState(s){ G = s; renderHud(); }
+
+function startGame(){
+  document.getElementById('lobby').classList.add('hidden');
+  document.getElementById('hud').classList.remove('hidden');
+  document.getElementById('help').classList.remove('hidden');
+  renderHud();
+}
+
+// =========================================================================
+// INPUT  (both roles aim; host applies directly, guest sends to host)
+// =========================================================================
+function myTurn(){ return G && G.turn === myPlayer && G.phase === 'aim'; }
+
+function cueBall(){ return G.balls.find(b => b.n === 0); }
+
+cv.addEventListener('mousemove', e => {
+  if (!G) return;
+  const p = pt(e);
+  if (ballInHandPlacing) return; // handled on click
+  if (!myTurn()) return;
+  const cb = cueBall();
+  if (!cb || !cb.alive) return;
+  aim.angle = Math.atan2(p.y - cb.y, p.x - cb.x);
+  if (aim.dragging){
+    // power from drag distance behind the cue ball
+    const d = Math.hypot(p.x - cb.x, p.y - cb.y);
+    aim.power = Math.max(0, Math.min(MAX_POWER, (d - R) / 14));
+  }
+  sendAim();
+});
+
+cv.addEventListener('mousedown', e => {
+  if (!G) return;
+  const p = pt(e);
+  if (G.phase === 'over') return;
+
+  if (G.ballInHand && G.turn === myPlayer){
+    // place cue ball at a legal empty spot
+    if (canPlaceCue(p.x, p.y)){
+      if (role === 'host') hostHandlePlace(p.x, p.y);
+      else conn.send({ t:'place', x:p.x, y:p.y });
+    }
+    return;
+  }
+  if (!myTurn()) return;
+  aim.dragging = true;
+  aim.active = true;
+});
+
+window.addEventListener('mouseup', () => {
+  if (!G || !aim.dragging) return;
+  aim.dragging = false;
+  if (aim.power > 0.4 && myTurn()){
+    const shot = { angle: aim.angle, power: aim.power };
+    if (role === 'host') hostHandleShot(shot.angle, shot.power);
+    else conn.send({ t:'shot', ...shot });
+  }
+  aim.power = 0; aim.active = false;
+  sendAim();
+});
+
+function sendAim(){
+  if (!conn || !conn.open) return;
+  if (role === 'guest'){
+    conn.send({ t:'aim', angle:aim.angle, power:aim.power, active:aim.active });
+  } else if (role === 'host' && G){
+    // host carries its aim inside the state snapshot so the guest can render it
+    G._hostAim = { angle:aim.angle, power:aim.power, active:aim.active };
+    sendState();
+  }
+}
+
+function pt(e){
+  const r = cv.getBoundingClientRect();
+  return { x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height) };
+}
+
+function canPlaceCue(x,y){
+  if (x<RAIL+R || x>W-RAIL-R || y<RAIL+R || y>H-RAIL-R) return false;
+  for (const b of G.balls){
+    if (b.n!==0 && b.alive && Math.hypot(b.x-x,b.y-y) < R*2.1) return false;
+  }
+  return true;
+}
+
+// =========================================================================
+// HOST: shot handling & physics
+// =========================================================================
+function hostHandlePlace(x,y,fromPlayer){
+  // fromPlayer: 0 = host's own input, 1 = guest input. Default to host (0).
+  const src = (fromPlayer===undefined) ? 0 : fromPlayer;
+  if (G.turn !== src) return;          // authoritative: only the player whose turn it is may place
+  if (!G.ballInHand) return;
+  if (!canPlaceCue(x,y)) return;
+  const cb = cueBall();
+  cb.x = x; cb.y = y; cb.alive = true; cb.vx = cb.vy = 0;
+  G.ballInHand = false;
+  G.message = (G.turn===0?'P1':'P2') + ': take your shot';
+  renderHud();
+  sendState();
+}
+
+function hostHandleShot(angle, power, fromPlayer){
+  const src = (fromPlayer===undefined) ? 0 : fromPlayer;
+  if (G.turn !== src) return;          // authoritative: reject out-of-turn shots
+  if (G.phase !== 'aim') return;
+  if (G.ballInHand) return;            // must place cue ball before shooting
+  const cb = cueBall();
+  if (!cb.alive) return;
+  cb.vx = Math.cos(angle) * power;
+  cb.vy = Math.sin(angle) * power;
+  G.phase = 'sim';
+  G.shot = {
+    firstHit: null,       // number of first ball cue contacted
+    potted: [],           // numbers potted this shot
+    cueScratch: false,
+    railAfterContact: false,
+  };
+  G._guestAim = null;
+}
+
+// advance physics one frame; returns true while balls still moving
+function stepPhysics(){
+  let moving = false;
+  // Scale substeps to the fastest ball so no ball travels more than ~R per substep
+  // (prevents tunneling through balls/cushions on hard breaks).
+  let maxSpeed = 0;
+  for (const b of G.balls){ if (b.alive){ const sp=Math.hypot(b.vx,b.vy); if (sp>maxSpeed) maxSpeed=sp; } }
+  const steps = Math.max(SUBSTEPS, Math.ceil(maxSpeed / (R*0.5)));
+  for (let s=0; s<steps; s++){
+    // integrate
+    for (const b of G.balls){
+      if (!b.alive) continue;
+      b.x += b.vx / steps;
+      b.y += b.vy / steps;
+    }
+    // cushions
+    for (const b of G.balls){
+      if (!b.alive) continue;
+      let hit=false;
+      if (b.x < RAIL+R){ b.x=RAIL+R; b.vx=-b.vx; hit=true; }
+      if (b.x > W-RAIL-R){ b.x=W-RAIL-R; b.vx=-b.vx; hit=true; }
+      if (b.y < RAIL+R){ b.y=RAIL+R; b.vy=-b.vy; hit=true; }
+      if (b.y > H-RAIL-R){ b.y=H-RAIL-R; b.vy=-b.vy; hit=true; }
+      if (hit && G.shot && G.shot.firstHit!=null) G.shot.railAfterContact = true;
+    }
+    // ball-ball collisions
+    for (let i=0;i<G.balls.length;i++){
+      const a=G.balls[i]; if(!a.alive) continue;
+      for (let j=i+1;j<G.balls.length;j++){
+        const b=G.balls[j]; if(!b.alive) continue;
+        let dx=b.x-a.x, dy=b.y-a.y, dist=Math.hypot(dx,dy);
+        if (dist>0 && dist < 2*R){
+          // record first ball the cue touches
+          if (G.shot && G.shot.firstHit==null){
+            if (a.n===0) G.shot.firstHit=b.n;
+            else if (b.n===0) G.shot.firstHit=a.n;
+          }
+          const nx=dx/dist, ny=dy/dist;
+          const overlap = 2*R - dist;
+          a.x -= nx*overlap/2; a.y -= ny*overlap/2;
+          b.x += nx*overlap/2; b.y += ny*overlap/2;
+          // 1D elastic exchange along normal (equal mass)
+          const dvx=b.vx-a.vx, dvy=b.vy-a.vy;
+          const rel = dvx*nx + dvy*ny;
+          if (rel < 0){
+            a.vx += rel*nx; a.vy += rel*ny;
+            b.vx -= rel*nx; b.vy -= rel*ny;
+          }
+        }
+      }
+    }
+    // pockets
+    for (const b of G.balls){
+      if (!b.alive) continue;
+      for (const p of POCKETS){
+        if (Math.hypot(b.x-p.x, b.y-p.y) < POCKET){
+          b.alive=false; b.vx=b.vy=0;
+          if (b.n===0) G.shot.cueScratch=true;
+          else G.shot.potted.push(b.n);
+          break;
+        }
+      }
+    }
+  }
+  // friction + stop check
+  for (const b of G.balls){
+    if (!b.alive) continue;
+    b.vx*=FRICTION; b.vy*=FRICTION;
+    if (Math.hypot(b.vx,b.vy) < STOP){ b.vx=0; b.vy=0; }
+    else moving = true;
+  }
+  return moving;
+}
+
+// evaluate rules at end of shot (host only)
+function resolveShot(){
+  const s = G.shot;
+  const me = G.turn, opp = 1-me;
+  const eight = G.balls.find(b=>b.n===8);
+  const eightPotted = s.potted.includes(8);
+  const myGroup = G.groups[me]; // may be null if open
+
+  // assign groups on first legal pot after break
+  let foul = false, reason='';
+
+  if (s.cueScratch) { foul = true; reason='Scratch'; }
+  if (s.firstHit == null) { foul = true; reason='No ball hit'; }
+
+  // determine legal "first hit" once groups assigned
+  if (!foul && !G.open && myGroup){
+    const fh = s.firstHit;
+    if (fh === 8){
+      // may only hit 8 first if all your group is gone
+      if (!groupCleared(myGroup)) { foul=true; reason='Hit the 8 first'; }
+    } else {
+      const fhGroup = isStripe(fh) ? 'stripe' : 'solid';
+      if (fhGroup !== myGroup) { foul=true; reason='Hit opponent\'s ball first'; }
+    }
+  }
+
+  // Was my group already cleared BEFORE this shot? Potted balls are already alive=false,
+  // so a ball sunk THIS shot must be detected via s.potted (it was alive before the shot).
+  // Cleared-before = no group ball still alive AND no group ball potted on this very shot.
+  function groupClearedBeforeShot(g){
+    const aliveInGroup = G.balls.some(b => b.alive && b.n!==0 && b.n!==8 &&
+      (isStripe(b.n)?'stripe':'solid')===g);
+    const pottedThisShot = s.potted.some(n => n!==8 && (isStripe(n)?'stripe':'solid')===g);
+    return !aliveInGroup && !pottedThisShot;
+  }
+
+  // 8-ball outcomes
+  if (eightPotted){
+    const clearedBefore = myGroup ? groupClearedBeforeShot(myGroup) : false;
+    if (G.open || !clearedBefore || foul){
+      // potted 8 too early, on a foul, or on the same shot as the last group ball → lose
+      G.phase='over'; G.winner = opp;
+      G.message = (me===0?'P1':'P2') + ' potted the 8 early — ' + (opp===0?'P1':'P2') + ' wins!';
+      renderHud(); sendState(); return;
+    } else {
+      G.phase='over'; G.winner = me;
+      G.message = (me===0?'P1':'P2') + ' sinks the 8 — wins the game! 🏆';
+      renderHud(); sendState(); return;
+    }
+  }
+
+  // open-table group assignment: only assign when EXACTLY one group was potted this shot.
+  // If the break drops both a solid and a stripe, the table stays open (real-rules behavior).
+  let pottedOwn = false;
+  if (G.open && !foul && s.potted.length){
+    const objs = s.potted.filter(n=>n!==8);
+    const sawSolid  = objs.some(n=>!isStripe(n));
+    const sawStripe = objs.some(n=> isStripe(n));
+    if (objs.length && sawSolid !== sawStripe){      // exactly one group present
+      const g = sawStripe ? 'stripe' : 'solid';
+      G.groups[me] = g;
+      G.groups[opp] = (g==='solid') ? 'stripe' : 'solid';
+      G.open = false;
+      pottedOwn = true;
+    } else if (objs.length){
+      // both groups potted on an open table → stay open, but grant continuation
+      pottedOwn = true;
+    }
+  } else if (!G.open && !foul && myGroup){
+    pottedOwn = s.potted.some(n => (isStripe(n)?'stripe':'solid')===myGroup);
+  }
+
+  if (!G.broken) G.broken = true;
+
+  // On a scratch the cue ball comes back to life, but its position is the incoming
+  // player's choice (ball-in-hand) — don't pin it to a fixed coordinate.
+  if (s.cueScratch){
+    const cb = cueBall();
+    cb.alive = true; cb.vx=cb.vy=0;
+    // park it off-screen until placed so it doesn't overlap or render mid-table
+    cb.x = -100; cb.y = -100;
+  }
+
+  // decide next turn
+  G.shot = null;
+  if (foul){
+    G.turn = opp;
+    G.ballInHand = true;
+    G.message = reason + '! ' + (opp===0?'P1':'P2') + ' — ball in hand';
+  } else if (pottedOwn){
+    G.turn = me; // pot one of yours → shoot again
+    G.ballInHand = false;
+    G.message = (me===0?'P1':'P2') + ': potted one — go again';
+  } else {
+    G.turn = opp;
+    G.ballInHand = false;
+    G.message = (opp===0?'P1':'P2') + '\'s turn';
+  }
+  G.phase = 'aim';
+  renderHud(); sendState();
+}
+
+function groupCleared(g){
+  return !G.balls.some(b => b.alive && b.n!==0 && b.n!==8 &&
+    ((isStripe(b.n)?'stripe':'solid')===g));
+}
+
+// =========================================================================
+// MAIN LOOP
+// =========================================================================
+function loop(){
+  if (G){
+    if (role === 'host' && G.phase === 'sim'){
+      const moving = stepPhysics();
+      streamState();            // stream positions to guest (throttled)
+      if (!moving) resolveShot();
+    }
+    if (role === 'host') renderHud();  // host keeps its own HUD in sync (guest updates via applyState)
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// =========================================================================
+// RENDER
+// =========================================================================
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // felt + subtle vignette
+  ctx.fillStyle = '#0b6b3a'; ctx.fillRect(0,0,W,H);
+  // cushions
+  ctx.fillStyle = '#0a5e33';
+  ctx.fillRect(RAIL-6,RAIL-6, W-2*RAIL+12, H-2*RAIL+12);
+  ctx.strokeStyle='#063f22'; ctx.lineWidth=2;
+  ctx.strokeRect(RAIL,RAIL,W-2*RAIL,H-2*RAIL);
+  // pockets
+  for (const p of POCKETS){
+    ctx.beginPath(); ctx.arc(p.x,p.y,POCKET-3,0,7); ctx.fillStyle='#0a0a0a'; ctx.fill();
+  }
+  // head line
+  ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.beginPath();
+  ctx.moveTo(W*0.28,RAIL); ctx.lineTo(W*0.28,H-RAIL); ctx.stroke();
+
+  // balls
+  for (const b of G.balls){
+    if (!b.alive) continue;
+    drawBall(b);
+  }
+
+  // aim line (whoever is aiming)
+  drawAim();
+
+  // overlay for game over
+  if (G.phase === 'over'){
+    ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 30px system-ui';
+    const won = G.winner === myPlayer;
+    ctx.fillText(won ? 'YOU WIN! 🏆' : 'You lose 😞', W/2, H/2-10);
+    ctx.font='15px system-ui'; ctx.fillStyle='#d9b35c';
+    ctx.fillText(G.message, W/2, H/2+22);
+    if (role==='host') ctx.fillText('(host: refresh both pages for a rematch)', W/2, H/2+46);
+    ctx.textAlign='start';
+  }
+}
+
+function drawBall(b){
+  ctx.save();
+  ctx.beginPath(); ctx.arc(b.x,b.y,R,0,7);
+  if (b.n===0){ ctx.fillStyle='#f6f3ea'; }
+  else { ctx.fillStyle = BALLCOL[b.n] || '#ccc'; }
+  ctx.fill();
+  if (isStripe(b.n)){
+    // white stripe band
+    ctx.save();
+    ctx.beginPath(); ctx.arc(b.x,b.y,R,0,7); ctx.clip();
+    ctx.fillStyle='#f6f3ea';
+    ctx.fillRect(b.x-R, b.y-R*0.45, R*2, R*0.9);
+    ctx.restore();
+  }
+  // number
+  if (b.n!==0){
+    ctx.beginPath(); ctx.arc(b.x,b.y,R*0.5,0,7); ctx.fillStyle='#fff'; ctx.fill();
+    ctx.fillStyle='#111'; ctx.font='bold 9px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(b.n, b.x, b.y+0.5);
+    ctx.textAlign='start'; ctx.textBaseline='alphabetic';
+  }
+  // shine
+  ctx.beginPath(); ctx.arc(b.x-R*0.3,b.y-R*0.3,R*0.28,0,7);
+  ctx.fillStyle='rgba(255,255,255,.35)'; ctx.fill();
+  ctx.restore();
+}
+
+function drawAim(){
+  const cb = cueBall();
+  if (!cb || !cb.alive || G.phase==='over') return;
+
+  // ball-in-hand cursor hint
+  if (G.ballInHand && G.turn===myPlayer){
+    ctx.fillStyle='rgba(255,255,255,.5)'; ctx.font='13px system-ui'; ctx.textAlign='center';
+    ctx.fillText('Click an empty spot to place the cue ball', W/2, H-12); ctx.textAlign='start';
+  }
+
+  if (G.phase!=='aim') return;
+
+  // Pick which aim to render, explicitly:
+  //  - my own live aim when it's my turn
+  //  - the opponent's streamed aim when it's their turn (host sees guest via _guestAim,
+  //    guest sees host via _hostAim carried in the state snapshot)
+  let a = null;
+  if (myTurn()){
+    a = aim;
+  } else if (role==='host' && G.turn===1 && G._guestAim && G._guestAim.active){
+    a = G._guestAim;
+  } else if (role==='guest' && G.turn===0 && G._hostAim && G._hostAim.active){
+    a = G._hostAim;
+  }
+  if (!a) return;
+
+  const ang = a.angle || 0;
+  const pw = a.power || 0;
+
+  // projected line until it hits a cushion (simple)
+  let x=cb.x, y=cb.y, dx=Math.cos(ang), dy=Math.sin(ang);
+  let t=0; const maxT=1200; let hx=x, hy=y;
+  for (; t<maxT; t+=4){
+    const nx=cb.x+dx*t, ny=cb.y+dy*t;
+    if (nx<RAIL+R||nx>W-RAIL-R||ny<RAIL+R||ny>H-RAIL-R) break;
+    // stop at first ball
+    let blocked=false;
+    for (const b of G.balls){ if(b.n!==0&&b.alive&&Math.hypot(b.x-nx,b.y-ny)<2*R){blocked=true;break;} }
+    hx=nx; hy=ny;
+    if (blocked) break;
+  }
+  ctx.setLineDash([6,6]); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(cb.x,cb.y); ctx.lineTo(hx,hy); ctx.stroke();
+  ctx.setLineDash([]);
+  // target marker
+  ctx.beginPath(); ctx.arc(hx,hy,R,0,7); ctx.strokeStyle='rgba(255,255,255,.5)'; ctx.stroke();
+
+  // power indicator behind cue ball
+  if (pw>0){
+    const bx=cb.x-dx*(R+pw*14), by=cb.y-dy*(R+pw*14);
+    ctx.strokeStyle='#d9b35c'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(cb.x,cb.y); ctx.lineTo(bx,by); ctx.stroke();
+  }
+}
+
+// =========================================================================
+// HUD
+// =========================================================================
+function grpDot(g){
+  if (!g) return '<span class="muted">—</span>';
+  if (g==='solid') return '<span class="dot" style="background:#e0322b"></span> solids';
+  return '<span class="dot" style="background:#fff;border:2px solid #1f4fd8"></span> stripes';
+}
+function renderHud(){
+  if (!G) return;
+  document.getElementById('p1grp').innerHTML = grpDot(G.groups[0]);
+  document.getElementById('p2grp').innerHTML = grpDot(G.groups[1]);
+  const p1=document.getElementById('p1pill'), p2=document.getElementById('p2pill');
+  p1.classList.toggle('you', myPlayer===0);
+  p2.classList.toggle('you', myPlayer===1);
+  p1.style.outline = G.turn===0 ? '2px solid #d9b35c':'none';
+  p2.style.outline = G.turn===1 ? '2px solid #d9b35c':'none';
+  document.getElementById('turnmsg').textContent =
+    G.message + (G.turn===myPlayer && G.phase==='aim' ? '  (your shot)' : '');
+}
+</script>
+</body>
+</html>
