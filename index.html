@@ -84,8 +84,11 @@
 
   <canvas id="cv" width="900" height="500"></canvas>
 
+  <div id="controls"><div id="spinwrap"><div id="spinpad"><div id="spindot"></div></div><div class="ctl-label">Spin / <b>english</b><br>drag the dot<br><button id="resetspin">center</button></div></div></div>
+
   <div id="help" class="hidden">
-    Aim with the mouse · click-drag back from the cue ball to set power, release to shoot ·
+    Aim with the mouse · press and <b>HOLD</b> on the table to charge the power meter
+    (it sweeps 0→100→0), release to shoot · drag the spin dot to add follow/draw/english ·
     on a foul the other player gets <b>ball-in-hand</b> (click an empty spot to place the cue ball).
     Pot the 8-ball last to win — pot it early or scratch on it and you lose.
   </div>
@@ -107,6 +110,15 @@ const FRICTION = 0.988;          // per-frame velocity damping
 const STOP = 0.05;               // speed below which a ball is considered stopped
 const MAX_POWER = 17;            // max launch speed
 const SUBSTEPS = 3;              // physics substeps per frame for stability
+const CHARGE_HALF_MS = 1200;    // 1.2s per half-sweep (2.4s full 0->MAX->0 cycle)
+
+// Triangle-wave power: holding the mouse sweeps power 0 -> MAX_POWER -> 0 forever.
+// Pure helper so it is trivially unit-testable.
+function chargePower(elapsedMs){
+  const phase = (elapsedMs % (2*CHARGE_HALF_MS)) / CHARGE_HALF_MS;
+  const tri = phase <= 1 ? phase : 2 - phase;
+  return tri * MAX_POWER;
+}
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
@@ -131,8 +143,11 @@ let G = null;            // authoritative game object (host owns; guest mirrors 
 let role = null;         // 'host' | 'guest'
 let myPlayer = 0;        // 0 = player1, 1 = player2  (host is P1, guest is P2)
 let conn = null, peer = null;
-let aim = { active:false, angle:0, power:0, dragging:false };
+let aim = { active:false, angle:0, power:0, dragging:false /* legacy, no longer used */, charging:false, chargeStart:0 };
 let ballInHandPlacing = false;
+// Spin / english: contact point on the cue ball, unit-circle clamped.
+//   sx = side (horizontal, [-1,1]); sy = follow(+)/draw(-) (vertical, [-1,1]).
+let spin = { sx:0, sy:0 };
 
 function freshState() {
   const balls = [];
@@ -267,12 +282,13 @@ function wireConn(){
 // Host receives guest input; guest receives state snapshots.
 function onData(msg){
   if (role === 'host') {
-    // All messages here originate from the guest, who is always Player 1.
-    if (msg.t === 'shot')      hostHandleShot(msg.angle, msg.power, 1);
+    // All messages here originate from the guest, who is always player index 1 (UI: Player 2).
+    if (msg.t === 'shot')      hostHandleShot(msg.angle, msg.power, 1, msg.sx||0, msg.sy||0);
     else if (msg.t === 'place') hostHandlePlace(msg.x, msg.y, 1);
     else if (msg.t === 'aim')   { G._guestAim = msg; } // for spectating opponent's aim
   } else {
     if (msg.t === 'state') { applyState(msg.s); }
+    else if (msg.t === 'hostaim' && G){ G._hostAim = { angle:msg.angle, power:msg.power, active:msg.active }; }
   }
 }
 
@@ -312,13 +328,13 @@ cv.addEventListener('mousemove', e => {
   if (!myTurn()) return;
   const cb = cueBall();
   if (!cb || !cb.alive) return;
+  // Aim still tracks the mouse even WHILE charging (re-aim mid-charge).
+  // Power no longer comes from drag distance — it is the oscillating charge value (see loop()).
   aim.angle = Math.atan2(p.y - cb.y, p.x - cb.x);
-  if (aim.dragging){
-    // power from drag distance behind the cue ball
-    const d = Math.hypot(p.x - cb.x, p.y - cb.y);
-    aim.power = Math.max(0, Math.min(MAX_POWER, (d - R) / 14));
-  }
-  sendAim();
+  // While charging, the throttled loop() path (every 3rd frame) is the SOLE emitter
+  // so a fast mouse can't flood the channel with one packet per mousemove. When idle
+  // (not charging) we still stream live aim so the opponent sees the cue track.
+  if (!aim.charging) sendAim();
 });
 
 cv.addEventListener('mousedown', e => {
@@ -335,18 +351,44 @@ cv.addEventListener('mousedown', e => {
     return;
   }
   if (!myTurn()) return;
-  aim.dragging = true;
+  // Start hold-to-oscillate charging. Power is driven per-frame in loop().
+  aim.charging = true;
   aim.active = true;
+  aim.chargeStart = performance.now();
+  aim.power = 0;
 });
 
 window.addEventListener('mouseup', () => {
-  if (!G || !aim.dragging) return;
-  aim.dragging = false;
+  if (!G || !aim.charging) return;
+  aim.charging = false;
   if (aim.power > 0.4 && myTurn()){
-    const shot = { angle: aim.angle, power: aim.power };
-    if (role === 'host') hostHandleShot(shot.angle, shot.power);
-    else conn.send({ t:'shot', ...shot });
+    const shot = { angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy };
+    if (role === 'host') hostHandleShot(shot.angle, shot.power, 0, spin.sx, spin.sy);
+    else {
+      conn.send({ t:'shot', angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy });
+      // Client prediction lock: the host won't flip our local G.phase until its next
+      // snapshot returns (tens of ms over WebRTC). Optimistically mark 'sim' now so
+      // myTurn() is false and we can't re-charge / send a phantom second shot in the gap.
+      // applyState() overwrites G wholesale when the authoritative state arrives.
+      G.phase = 'sim';
+    }
+    aim.power = 0; aim.active = false;
+    setSpin(0,0);          // per-shot UI reset — match the host-cleared server state
+    sendAim();
+  } else {
+    // Released at/near a trough — cancel, no shot.
+    aim.power = 0; aim.active = false;
+    sendAim();
   }
+});
+
+// Safety net: if the pointer-up happens outside the browser window the window
+// 'mouseup' above may never fire, leaving aim.charging stuck (the meter would
+// oscillate forever). On blur, deterministically resolve any held charge —
+// cancel it (no surprise shot the player can't see committing).
+window.addEventListener('blur', () => {
+  if (!G || !aim.charging) return;
+  aim.charging = false;
   aim.power = 0; aim.active = false;
   sendAim();
 });
@@ -356,9 +398,11 @@ function sendAim(){
   if (role === 'guest'){
     conn.send({ t:'aim', angle:aim.angle, power:aim.power, active:aim.active });
   } else if (role === 'host' && G){
-    // host carries its aim inside the state snapshot so the guest can render it
+    // host carries its aim inside the state snapshot so the guest can render it,
+    // but ship a TINY dedicated message instead of a full sendState() snapshot —
+    // otherwise every charge tick would resend all 16 balls + groups + message.
     G._hostAim = { angle:aim.angle, power:aim.power, active:aim.active };
-    sendState();
+    if (conn && conn.open) conn.send({ t:'hostaim', angle:aim.angle, power:aim.power, active:aim.active });
   }
 }
 
@@ -366,6 +410,49 @@ function pt(e){
   const r = cv.getBoundingClientRect();
   return { x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height) };
 }
+
+// =========================================================================
+// SPIN / ENGLISH pad
+// =========================================================================
+const spinpad = document.getElementById('spinpad');
+const spindot = document.getElementById('spindot');
+
+// Update spin state + reposition the dot. sx/sy already in [-1,1], unit-clamped.
+// Visual: up = follow (positive sy) so the dot's screen-y is the negation of sy.
+function setSpin(sx, sy){
+  spin.sx = sx; spin.sy = sy;
+  if (spindot){
+    spindot.style.left = (50 + sx*42) + '%';
+    spindot.style.top  = (50 - sy*42) + '%';
+  }
+}
+
+let _spinDragging = false;
+function spinFromEvent(e){
+  const r = spinpad.getBoundingClientRect();
+  let nx = (e.clientX - r.left)/r.width*2 - 1;
+  let ny = (e.clientY - r.top)/r.height*2 - 1;
+  const m = Math.hypot(nx, ny);
+  if (m > 1){ nx /= m; ny /= m; }
+  setSpin(nx, -ny);   // negate Y so up = follow = positive
+}
+if (spinpad){
+  spinpad.addEventListener('pointerdown', e => {
+    if (G && !myTurn()) return;   // only set english on your own shot
+    _spinDragging = true;
+    spinpad.setPointerCapture?.(e.pointerId);
+    spinFromEvent(e);
+  });
+  spinpad.addEventListener('pointermove', e => {
+    if (!_spinDragging) return;
+    spinFromEvent(e);
+  });
+  const endDrag = () => { _spinDragging = false; };
+  spinpad.addEventListener('pointerup', endDrag);
+  spinpad.addEventListener('pointercancel', endDrag);
+}
+const _resetSpinBtn = document.getElementById('resetspin');
+if (_resetSpinBtn) _resetSpinBtn.onclick = () => setSpin(0, 0);
 
 function canPlaceCue(x,y){
   if (x<RAIL+R || x>W-RAIL-R || y<RAIL+R || y>H-RAIL-R) return false;
@@ -392,7 +479,7 @@ function hostHandlePlace(x,y,fromPlayer){
   sendState();
 }
 
-function hostHandleShot(angle, power, fromPlayer){
+function hostHandleShot(angle, power, fromPlayer, sx, sy){
   const src = (fromPlayer===undefined) ? 0 : fromPlayer;
   if (G.turn !== src) return;          // authoritative: reject out-of-turn shots
   if (G.phase !== 'aim') return;
@@ -407,6 +494,13 @@ function hostHandleShot(angle, power, fromPlayer){
     potted: [],           // numbers potted this shot
     cueScratch: false,
     railAfterContact: false,
+    // spin/english captured at shot time (host-authoritative)
+    spinX: sx || 0,       // side english [-1,1]
+    spinY: sy || 0,       // follow(+)/draw(-) [-1,1]
+    dirX: Math.cos(angle),
+    dirY: Math.sin(angle),
+    power: power,
+    spinApplied: false,   // apply spin once, on first cue-object contact
   };
   G._guestAim = null;
 }
@@ -458,6 +552,31 @@ function stepPhysics(){
           if (rel < 0){
             a.vx += rel*nx; a.vy += rel*ny;
             b.vx -= rel*nx; b.vy -= rel*ny;
+            // ---- spin / english (cue ball only, once per shot) ----
+            // Apply on the first momentum-exchanging contact between the cue
+            // ball and an object ball. Modifies ONLY the cue ball's velocity.
+            if (G.shot && !G.shot.spinApplied && (a.n===0 || b.n===0) && (a.n!==0 || b.n!==0)){
+              const cue = (a.n===0) ? a : b;
+              const s = G.shot;
+              // follow(+)/draw(-): add longitudinal velocity along shot direction
+              const k = 0.18 * (s.power || 0);
+              cue.vx += s.dirX * s.spinY * k;
+              cue.vy += s.dirY * s.spinY * k;
+              // side english: add a LATERAL kick perpendicular to the shot
+              // direction, scaled by power. Done as a velocity add (not a
+              // rotation of the post-contact velocity) so it still biases the
+              // cue's path on dead-straight shots where the cue transferred
+              // essentially all of its velocity to the object ball and the
+              // surviving velocity is ~0 (rotating ~0 would do nothing).
+              const perpX = -s.dirY, perpY = s.dirX;
+              const sk = 0.12 * (s.power || 0) * s.spinX;
+              cue.vx += perpX * sk;
+              cue.vy += perpY * sk;
+              // stability clamp: never let spin launch the cue past sane bounds
+              const sp = Math.hypot(cue.vx, cue.vy), cap = MAX_POWER*1.2;
+              if (sp > cap){ const f = cap/sp; cue.vx *= f; cue.vy *= f; }
+              s.spinApplied = true;
+            }
           }
         }
       }
@@ -595,8 +714,23 @@ function groupCleared(g){
 // =========================================================================
 // MAIN LOOP
 // =========================================================================
+let _aimStreamCtr = 0;
 function loop(){
   if (G){
+    // Drive the oscillating power meter while holding on our turn.
+    if (myTurn() && aim.charging){
+      aim.power = chargePower(performance.now() - aim.chargeStart);
+      // Throttle aim streaming to ~every 3rd frame so the meter rides out to the
+      // opponent (spectated via _hostAim/_guestAim power) without flooding the channel.
+      if ((++_aimStreamCtr % 3) === 0) sendAim();
+    } else if (aim.charging){
+      // We were charging but an authoritative snapshot flipped turn/phase out
+      // from under the held mouse. Defensively clear the local charge so the
+      // meter doesn't stay stuck and the opponent's spectated 'aiming' bar gets
+      // corrected with a final sendAim().
+      aim.charging = false; aim.active = false; aim.power = 0;
+      sendAim();
+    }
     if (role === 'host' && G.phase === 'sim'){
       const moving = stepPhysics();
       streamState();            // stream positions to guest (throttled)
@@ -725,12 +859,52 @@ function drawAim(){
   // target marker
   ctx.beginPath(); ctx.arc(hx,hy,R,0,7); ctx.strokeStyle='rgba(255,255,255,.5)'; ctx.stroke();
 
-  // power indicator behind cue ball
+  // power indicator behind cue ball (cue-stick pullback) — reflects oscillating value
   if (pw>0){
     const bx=cb.x-dx*(R+pw*14), by=cb.y-dy*(R+pw*14);
     ctx.strokeStyle='#d9b35c'; ctx.lineWidth=3;
     ctx.beginPath(); ctx.moveTo(cb.x,cb.y); ctx.lineTo(bx,by); ctx.stroke();
   }
+
+  // Fixed-position oscillating power bar (drawn for whoever is active, so the
+  // spectator also sees the opponent charging via the streamed _hostAim/_guestAim).
+  if (a.active){
+    drawPowerBar(pw, a === aim && aim.charging);
+  }
+}
+
+// Vertical power meter pinned to the lower-left of the table. Fill scales with
+// power/MAX_POWER and ramps green -> yellow -> red. Border pulses while charging.
+function drawPowerBar(pw, charging){
+  const frac = Math.max(0, Math.min(1, pw / MAX_POWER));
+  const bx = RAIL + 8, by = RAIL + 8;
+  const bw = 18, bh = H - 2*RAIL - 16;
+  ctx.save();
+  // track
+  ctx.fillStyle = 'rgba(0,0,0,.45)';
+  ctx.fillRect(bx, by, bw, bh);
+  // fill (bottom-up) with green->yellow->red ramp
+  const fillH = bh * frac;
+  const hue = 120 * (1 - frac);   // 120=green at 0, 0=red at full
+  ctx.fillStyle = `hsl(${hue}, 85%, 48%)`;
+  ctx.fillRect(bx, by + (bh - fillH), bw, fillH);
+  // border (pulse while charging)
+  if (charging){
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 120);
+    ctx.strokeStyle = `rgba(255,255,255,${0.4 + 0.5*pulse})`;
+    ctx.lineWidth = 2 + 1.5*pulse;
+  } else {
+    ctx.strokeStyle = 'rgba(255,255,255,.55)';
+    ctx.lineWidth = 2;
+  }
+  ctx.strokeRect(bx, by, bw, bh);
+  // numeric percent above the bar
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 12px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.round(frac*100) + '%', bx + bw/2, by - 4);
+  ctx.textAlign = 'start';
+  ctx.restore();
 }
 
 // =========================================================================
@@ -741,8 +915,16 @@ function grpDot(g){
   if (g==='solid') return '<span class="dot" style="background:#e0322b"></span> solids';
   return '<span class="dot" style="background:#fff;border:2px solid #1f4fd8"></span> stripes';
 }
+let _wasMyAimTurn = false;
 function renderHud(){
   if (!G) return;
+  // Recenter the spin pad on the edge where the aim turn is handed TO me (works for
+  // both roles: guest via applyState, host via resolveShot). Matches 'reset after each
+  // shot' for both players, not just whoever physically shot last. Skip while actively
+  // dragging the dot so a live adjustment isn't yanked back to center.
+  const _mineAim = G.turn === myPlayer && G.phase === 'aim';
+  if (_mineAim && !_wasMyAimTurn && !_spinDragging) setSpin(0, 0);
+  _wasMyAimTurn = _mineAim;
   document.getElementById('p1grp').innerHTML = grpDot(G.groups[0]);
   document.getElementById('p2grp').innerHTML = grpDot(G.groups[1]);
   const p1=document.getElementById('p1pill'), p2=document.getElementById('p2pill');
