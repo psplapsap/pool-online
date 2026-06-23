@@ -1144,7 +1144,8 @@ function drawAim(){
   // it hits nothing), a ghost ball at the contact point, and a short arrow showing
   // which way the struck ball will travel. Not a full solver — just a useful hint.
   const dx=Math.cos(ang), dy=Math.sin(ang);
-  const ASSIST_MAX = 260;          // px: how far ahead we ever draw the guide
+  const ASSIST_MAX = W + H;        // effectively unbounded: the white line runs the
+                                   // full table until it meets the first ball or cushion
   let bestT = Infinity, target = null;
   for (const b of G.balls){
     if (b.n===0 || !b.alive) continue;
