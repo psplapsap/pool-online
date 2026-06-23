@@ -453,8 +453,15 @@ document.getElementById('btnCreate').onclick = () => {
     conn = c;
     wireConn();
     conn.on('open', () => {
-      setStatus('Opponent connected! You are Player 1 (host).');
-      G = freshState();
+      if (!G || G.phase === undefined){
+        // first time anyone joins → start a fresh game
+        setStatus('Opponent connected! You are Player 1 (host).');
+        G = freshState();
+      } else {
+        // a player REJOINED mid-game (they misclicked/left and came back) →
+        // keep the board and just resume by re-sending current state.
+        setStatus('Opponent reconnected — resuming the game.');
+      }
       startGame();
       sendState();
     });
