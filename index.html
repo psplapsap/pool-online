@@ -170,9 +170,11 @@
 
   <div id="help" class="hidden">
     Aim with the mouse · press and <b>HOLD</b> on the table to charge the power meter
-    (it sweeps 0→100→0), release to shoot · drag the spin dot to add follow/draw/english ·
-    on a foul the other player gets <b>ball-in-hand</b> (click an empty spot to place the cue ball).
-    Pot the 8-ball last to win — pot it early or scratch on it and you lose.
+    (it sweeps 0→100→0), release to shoot · drag the spin dot to add follow/draw/english.<br>
+    Aim guide: the <b>white</b> dashed line + ghost ball show where you'll strike; the
+    <b style="color:#9cd6ff">blue</b> arrow is the <b>cue ball's</b> path after contact, and the
+    colored arrow is where the <b>object ball</b> goes.<br>
+    On a foul the other player gets <b>ball-in-hand</b>. Pot the 8-ball last to win — pot it early or scratch on it and you lose.
   </div>
 </div>
 
@@ -1190,6 +1192,28 @@ function drawAim(){
     ctx.lineTo(ex-Math.cos(base+0.4)*ah, ey-Math.sin(base+0.4)*ah);
     ctx.closePath(); ctx.fillStyle=col; ctx.fill();
     ctx.globalAlpha=1;
+
+    // CUE-BALL DEFLECTION ("reflect angle"): on a center-ball hit the cue ball
+    // leaves along the TANGENT line — i.e. its incoming velocity minus the part
+    // sent into the object ball (the line-of-centers/normal component). That
+    // leftover is the tangential component, ~90° off the object ball's path.
+    const dot = dx*ix + dy*iy;                 // incoming dir projected on the normal
+    let cdx = dx - dot*ix, cdy = dy - dot*iy;  // tangential remainder = cue's new dir
+    const cm = Math.hypot(cdx, cdy);
+    if (cm > 0.02){                            // (near-zero on a dead-straight stun shot)
+      cdx/=cm; cdy/=cm;
+      const cueLen = 40;
+      const cxe = gx + cdx*cueLen, cye = gy + cdy*cueLen;
+      ctx.strokeStyle='rgba(120,210,255,.95)'; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+      ctx.beginPath(); ctx.moveTo(gx,gy); ctx.lineTo(cxe,cye); ctx.stroke();
+      ctx.setLineDash([]);
+      // arrowhead for the cue path
+      const cb2=Math.atan2(cdy,cdx);
+      ctx.beginPath(); ctx.moveTo(cxe,cye);
+      ctx.lineTo(cxe-Math.cos(cb2-0.4)*ah, cye-Math.sin(cb2-0.4)*ah);
+      ctx.lineTo(cxe-Math.cos(cb2+0.4)*ah, cye-Math.sin(cb2+0.4)*ah);
+      ctx.closePath(); ctx.fillStyle='rgba(120,210,255,.95)'; ctx.fill();
+    }
   } else {
     // no ball in range: just a small endpoint tick on the cue line
     ctx.beginPath(); ctx.arc(gx,gy,3,0,7); ctx.fillStyle='rgba(255,255,255,.5)'; ctx.fill();
