@@ -145,6 +145,7 @@ let myPlayer = 0;        // 0 = player1, 1 = player2  (host is P1, guest is P2)
 let conn = null, peer = null;
 let aim = { active:false, angle:0, power:0, dragging:false /* legacy, no longer used */, charging:false, chargeStart:0 };
 let ballInHandPlacing = false;
+let ghost = { x:W*0.25, y:H/2 };   // cursor position for the ball-in-hand placement preview
 // Spin / english: contact point on the cue ball, unit-circle clamped.
 //   sx = side (horizontal, [-1,1]); sy = follow(+)/draw(-) (vertical, [-1,1]).
 let spin = { sx:0, sy:0 };
@@ -327,7 +328,9 @@ function cueBall(){ return G.balls.find(b => b.n === 0); }
 cv.addEventListener('mousemove', e => {
   if (!G) return;
   const p = pt(e);
-  if (ballInHandPlacing) return; // handled on click
+  ghost.x = p.x; ghost.y = p.y;   // track cursor for the ball-in-hand placement preview
+  // During ball-in-hand we are PLACING, not aiming: skip all aim/charge tracking.
+  if (G.ballInHand && G.turn === myPlayer) return;
   if (!myTurn()) return;
   const cb = cueBall();
   if (!cb || !cb.alive) return;
@@ -681,13 +684,10 @@ function resolveShot(){
 
   if (!G.broken) G.broken = true;
 
-  // On a scratch the cue ball comes back to life, but its position is the incoming
-  // player's choice (ball-in-hand) — don't pin it to a fixed coordinate.
+  // On a scratch the cue ball comes back to life (it was pocketed this shot).
   if (s.cueScratch){
     const cb = cueBall();
     cb.alive = true; cb.vx=cb.vy=0;
-    // park it off-screen until placed so it doesn't overlap or render mid-table
-    cb.x = -100; cb.y = -100;
   }
 
   // decide next turn
@@ -696,6 +696,10 @@ function resolveShot(){
     G.turn = opp;
     G.ballInHand = true;
     G.message = reason + '! ' + (opp===0?'P1':'P2') + ' — ball in hand';
+    // Park the cue ball off-screen until the incoming player places it, so the
+    // table shows ONLY the green/red placement ghost (not a stray real cue ball).
+    const cb = cueBall();
+    cb.alive = true; cb.vx=cb.vy=0; cb.x = -100; cb.y = -100;
   } else if (pottedOwn){
     G.turn = me; // pot one of yours → shoot again
     G.ballInHand = false;
@@ -819,10 +823,35 @@ function drawAim(){
   const cb = cueBall();
   if (!cb || !cb.alive || G.phase==='over') return;
 
-  // ball-in-hand cursor hint
+  // BALL-IN-HAND: we're PLACING the cue ball, not aiming. Draw a ghost ball that
+  // follows the cursor (green = legal spot, red = blocked) instead of an aim line,
+  // so it's unmistakable you're positioning rather than shooting.
   if (G.ballInHand && G.turn===myPlayer){
-    ctx.fillStyle='rgba(255,255,255,.5)'; ctx.font='13px system-ui'; ctx.textAlign='center';
-    ctx.fillText('Click an empty spot to place the cue ball', W/2, H-12); ctx.textAlign='start';
+    const legal = canPlaceCue(ghost.x, ghost.y);
+    ctx.save();
+    // ghost ball
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath(); ctx.arc(ghost.x, ghost.y, R, 0, 7);
+    ctx.fillStyle = legal ? 'rgba(246,243,234,.85)' : 'rgba(120,120,120,.5)';
+    ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = legal ? '#3fcf6b' : '#e0322b';
+    ctx.stroke();
+    // crosshair ring
+    ctx.globalAlpha = 0.9;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.arc(ghost.x, ghost.y, R+6, 0, 7);
+    ctx.strokeStyle = legal ? 'rgba(63,207,107,.8)' : 'rgba(224,50,43,.8)';
+    ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+    // instruction banner
+    ctx.fillStyle = legal ? 'rgba(63,207,107,.95)' : 'rgba(224,50,43,.95)';
+    ctx.font='bold 14px system-ui'; ctx.textAlign='center';
+    ctx.fillText(legal ? '🖐 Click to place the cue ball here'
+                       : '✗ Can\'t place here — find an open spot', W/2, H-14);
+    ctx.textAlign='start';
+    return;   // never draw the shooting aim line during placement
   }
 
   if (G.phase!=='aim') return;
