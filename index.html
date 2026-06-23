@@ -80,6 +80,7 @@
     <div class="pill" id="p1pill">P1 <span class="grp" id="p1grp"></span></div>
     <div class="pill"><span id="turnmsg">…</span></div>
     <div class="pill" id="p2pill">P2 <span class="grp" id="p2grp"></span></div>
+    <button id="muteBtn" class="secondary" style="padding:6px 10px" title="Toggle sound">🔊</button>
   </div>
 
   <canvas id="cv" width="900" height="500"></canvas>
@@ -122,6 +123,90 @@ function chargePower(elapsedMs){
 
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
+
+// =========================================================================
+// SOUND — procedural Web Audio (no files; works offline). Physics is host-only,
+// so the host tags streamed snapshots with sound events and both clients play
+// them; the guest dedups by event id so each sound fires exactly once per side.
+// =========================================================================
+let _audioCtx = null, soundOn = true;
+function audio(){
+  if (!_audioCtx){
+    try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ return null; }
+  }
+  // browsers start the context 'suspended' until a user gesture
+  if (_audioCtx.state === 'suspended') _audioCtx.resume();
+  return _audioCtx;
+}
+// A short noise burst through a band-pass — the body of a "click/clack/thud".
+function noiseHit(freq, dur, vol, q){
+  const ac = audio(); if (!ac || !soundOn) return;
+  vol = Math.max(0, Math.min(1, vol));
+  if (vol <= 0.001) return;
+  const n = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, n, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i=0;i<n;i++){ d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 2); } // decaying noise
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const bp = ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=freq; bp.Q.value=q||6;
+  const g = ac.createGain(); g.gain.value=vol;
+  src.connect(bp); bp.connect(g); g.connect(ac.destination);
+  src.start();
+}
+// A quick tonal "blip" (used for the pocket drop + win chime).
+function tone(freq, dur, vol, type){
+  const ac = audio(); if (!ac || !soundOn) return;
+  const o = ac.createOscillator(); o.type = type||'sine'; o.frequency.value = freq;
+  const g = ac.createGain();
+  g.gain.setValueAtTime(0.0001, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.001,vol), ac.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+  o.connect(g); g.connect(ac.destination);
+  o.start(); o.stop(ac.currentTime + dur + 0.02);
+}
+// Map a logical sound event {type, v} (v = normalized intensity 0..1) to audio.
+function playSound(ev){
+  if (!ev) return;
+  const v = ev.v == null ? 0.6 : ev.v;
+  switch(ev.type){
+    case 'cue':     noiseHit(220, 0.07, 0.35 + 0.4*v, 3); tone(150, 0.05, 0.12*v, 'square'); break;
+    case 'clack':   noiseHit(900, 0.05, 0.18 + 0.5*v, 8); break;          // ball-on-ball
+    case 'cushion': noiseHit(180, 0.10, 0.12 + 0.35*v, 2); break;         // rail thud
+    case 'pocket':  tone(420, 0.12, 0.25, 'sine'); tone(280, 0.18, 0.2, 'sine'); noiseHit(120,0.15,0.2,2); break;
+    case 'win':     [523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,0.25,0.25,'triangle'), i*110)); break;
+    case 'lose':    [392,330,262].forEach((f,i)=>setTimeout(()=>tone(f,0.3,0.2,'sine'), i*150)); break;
+  }
+}
+// Host accumulates sound events for the current snapshot here.
+let _soundQueue = [];
+let _soundIdCtr = 0;
+function emitSound(type, v){ _soundQueue.push({ type, v }); }
+// Host: play this frame's queued sounds locally and stamp them onto G so the
+// streamed snapshot carries them to the guest (with an id for dedup). Caps the
+// number of simultaneous events so a big break doesn't become an audio wall.
+function flushSounds(){
+  if (!G) return;
+  if (_soundQueue.length){
+    // collapse to at most 4 loudest events this frame
+    const evs = _soundQueue.sort((a,b)=>(b.v||0)-(a.v||0)).slice(0,4);
+    for (const ev of evs) playSound(ev);   // host hears it immediately
+    G._sounds = evs;
+    G._soundId = ++_soundIdCtr;
+    _soundQueue = [];
+  } else {
+    G._sounds = null;   // nothing this frame
+  }
+}
+// Guest plays any sound events on a freshly-applied snapshot, deduped by id.
+let _lastSoundId = -1;
+let _gameOverSounded = false;   // win/lose chime fires once
+function playStateSounds(s){
+  if (!s || !s._sounds || s._soundId === undefined) return;
+  if (s._soundId === _lastSoundId) return;   // already played this batch
+  _lastSoundId = s._soundId;
+  for (const ev of s._sounds) playSound(ev);
+}
 
 // pocket centers (4 corners + 2 sides)
 const POCKETS = [
@@ -309,7 +394,7 @@ function streamState(){
   if (role !== 'host' || !conn || !conn.open) return;
   conn.send({ t:'state', s: G });
 }
-function applyState(s){ G = s; startGame(); renderHud(); }  // startGame() is idempotent; guarantees the guest's HUD is visible once state arrives
+function applyState(s){ G = s; playStateSounds(s); startGame(); renderHud(); }  // startGame() is idempotent; guarantees the guest's HUD is visible once state arrives; play any streamed sound events (deduped by id)
 
 function startGame(){
   document.getElementById('lobby').classList.add('hidden');
@@ -345,6 +430,7 @@ cv.addEventListener('mousemove', e => {
 
 cv.addEventListener('mousedown', e => {
   if (!G) return;
+  audio();                 // unlock/resume the AudioContext on a user gesture
   const p = pt(e);
   if (G.phase === 'over') return;
 
@@ -460,6 +546,13 @@ if (spinpad){
 const _resetSpinBtn = document.getElementById('resetspin');
 if (_resetSpinBtn) _resetSpinBtn.onclick = () => setSpin(0, 0);
 
+const _muteBtn = document.getElementById('muteBtn');
+if (_muteBtn) _muteBtn.onclick = () => {
+  soundOn = !soundOn;
+  _muteBtn.textContent = soundOn ? '🔊' : '🔇';
+  if (soundOn){ audio(); tone(660, 0.08, 0.2, 'triangle'); }  // tiny confirmation blip + unlock audio
+};
+
 function canPlaceCue(x,y){
   if (x<RAIL+R || x>W-RAIL-R || y<RAIL+R || y>H-RAIL-R) return false;
   for (const b of G.balls){
@@ -494,6 +587,7 @@ function hostHandleShot(angle, power, fromPlayer, sx, sy){
   if (!cb.alive) return;
   cb.vx = Math.cos(angle) * power;
   cb.vy = Math.sin(angle) * power;
+  emitSound('cue', power / MAX_POWER);   // cue-stick strike, louder on harder shots
   G.phase = 'sim';
   G.shot = {
     firstHit: null,       // number of first ball cue contacted
@@ -530,11 +624,15 @@ function stepPhysics(){
     for (const b of G.balls){
       if (!b.alive) continue;
       let hit=false;
+      const preSpeed = Math.hypot(b.vx, b.vy);
       if (b.x < RAIL+R){ b.x=RAIL+R; b.vx=-b.vx; hit=true; }
       if (b.x > W-RAIL-R){ b.x=W-RAIL-R; b.vx=-b.vx; hit=true; }
       if (b.y < RAIL+R){ b.y=RAIL+R; b.vy=-b.vy; hit=true; }
       if (b.y > H-RAIL-R){ b.y=H-RAIL-R; b.vy=-b.vy; hit=true; }
-      if (hit && G.shot && G.shot.firstHit!=null) G.shot.railAfterContact = true;
+      if (hit){
+        if (G.shot && G.shot.firstHit!=null) G.shot.railAfterContact = true;
+        if (preSpeed > 0.6) emitSound('cushion', Math.min(1, preSpeed/MAX_POWER));
+      }
     }
     // ball-ball collisions
     for (let i=0;i<G.balls.length;i++){
@@ -558,6 +656,7 @@ function stepPhysics(){
           if (rel < 0){
             a.vx += rel*nx; a.vy += rel*ny;
             b.vx -= rel*nx; b.vy -= rel*ny;
+            if (-rel > 0.5) emitSound('clack', Math.min(1, -rel/MAX_POWER));  // impact loudness from closing speed
             // ---- spin / english (cue ball only, once per shot) ----
             // Apply on the first momentum-exchanging contact between the cue
             // ball and an object ball. Modifies ONLY the cue ball's velocity.
@@ -595,6 +694,7 @@ function stepPhysics(){
           b.alive=false; b.vx=b.vy=0;
           if (b.n===0) G.shot.cueScratch=true;
           else G.shot.potted.push(b.n);
+          emitSound('pocket', 0.8);
           break;
         }
       }
@@ -740,7 +840,8 @@ function loop(){
     }
     if (role === 'host' && G.phase === 'sim'){
       const moving = stepPhysics();
-      streamState();            // stream positions to guest (throttled)
+      flushSounds();            // play this frame's sounds locally + attach to snapshot
+      streamState();            // stream positions (and sound events) to guest
       if (!moving) resolveShot();
     }
     renderHud();   // keep both players' HUD (turn pills, message, "your shot") live every frame
@@ -781,9 +882,11 @@ function draw(){
 
   // overlay for game over
   if (G.phase === 'over'){
+    const won = G.winner === myPlayer;
+    // play the win/lose chime exactly once per side (player-relative)
+    if (!_gameOverSounded){ _gameOverSounded = true; playSound({ type: won ? 'win' : 'lose' }); }
     ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(0,0,W,H);
     ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='bold 30px system-ui';
-    const won = G.winner === myPlayer;
     ctx.fillText(won ? 'YOU WIN! 🏆' : 'You lose 😞', W/2, H/2-10);
     ctx.font='15px system-ui'; ctx.fillStyle='#d9b35c';
     ctx.fillText(G.message, W/2, H/2+22);
