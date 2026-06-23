@@ -139,22 +139,49 @@ function audio(){
   if (_audioCtx.state === 'suspended') _audioCtx.resume();
   return _audioCtx;
 }
-// A short noise burst through a band-pass — the body of a "click/clack/thud".
-function noiseHit(freq, dur, vol, q){
+// MODAL IMPACT — what makes a hard-body collision sound real: a handful of
+// inharmonic partials, each a sine that decays exponentially and very fast.
+// `partials` = [[freqMultiplier, gain, decaySeconds], ...] over a base freq.
+// `spread` adds tiny random pitch jitter so no two hits sound identical (the
+// single biggest reason the old noise-burst version sounded synthetic).
+function modal(baseFreq, partials, vol, spread){
   const ac = audio(); if (!ac || !soundOn) return;
   vol = Math.max(0, Math.min(1, vol));
   if (vol <= 0.001) return;
-  const n = Math.floor(ac.sampleRate * dur);
+  const t0 = ac.currentTime;
+  const jitter = 1 + (Math.random()*2-1) * (spread || 0.04);
+  const out = ac.createGain(); out.gain.value = vol; out.connect(ac.destination);
+  for (const [mult, g, decay] of partials){
+    const o = ac.createOscillator();
+    o.type = 'sine';
+    o.frequency.value = baseFreq * mult * jitter;
+    const env = ac.createGain();
+    // near-instant attack (~0.5ms), then exponential ring-down — the signature
+    // of resin/ivory contact.
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.exponentialRampToValueAtTime(g, t0 + 0.0005);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + decay);
+    o.connect(env); env.connect(out);
+    o.start(t0); o.stop(t0 + decay + 0.02);
+  }
+}
+// A tiny filtered-noise "tick" transient layered under an impact for the dry
+// contact snap (kept extremely short so it reads as attack, not as a hiss).
+function tick(freq, dur, vol){
+  const ac = audio(); if (!ac || !soundOn) return;
+  vol = Math.max(0, Math.min(1, vol));
+  if (vol <= 0.001) return;
+  const n = Math.max(1, Math.floor(ac.sampleRate * dur));
   const buf = ac.createBuffer(1, n, ac.sampleRate);
   const d = buf.getChannelData(0);
-  for (let i=0;i<n;i++){ d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 2); } // decaying noise
+  for (let i=0;i<n;i++){ d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 8); } // very fast decay
   const src = ac.createBufferSource(); src.buffer = buf;
-  const bp = ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=freq; bp.Q.value=q||6;
+  const hp = ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=freq;
   const g = ac.createGain(); g.gain.value=vol;
-  src.connect(bp); bp.connect(g); g.connect(ac.destination);
+  src.connect(hp); hp.connect(g); g.connect(ac.destination);
   src.start();
 }
-// A quick tonal "blip" (used for the pocket drop + win chime).
+// A clean musical tone for the win/lose chimes (not impacts).
 function tone(freq, dur, vol, type){
   const ac = audio(); if (!ac || !soundOn) return;
   const o = ac.createOscillator(); o.type = type||'sine'; o.frequency.value = freq;
@@ -170,10 +197,28 @@ function playSound(ev){
   if (!ev) return;
   const v = ev.v == null ? 0.6 : ev.v;
   switch(ev.type){
-    case 'cue':     noiseHit(220, 0.07, 0.35 + 0.4*v, 3); tone(150, 0.05, 0.12*v, 'square'); break;
-    case 'clack':   noiseHit(900, 0.05, 0.18 + 0.5*v, 8); break;          // ball-on-ball
-    case 'cushion': noiseHit(180, 0.10, 0.12 + 0.35*v, 2); break;         // rail thud
-    case 'pocket':  tone(420, 0.12, 0.25, 'sine'); tone(280, 0.18, 0.2, 'sine'); noiseHit(120,0.15,0.2,2); break;
+    case 'cue':
+      // leather tip on resin: lower, a touch softer, with a dry tick on top.
+      tick(2500, 0.006, 0.18 + 0.25*v);
+      modal(1100, [[1,0.5,0.05],[2.7,0.22,0.035],[5.1,0.1,0.02]], 0.35 + 0.4*v, 0.05);
+      break;
+    case 'clack':
+      // ball-on-ball: bright, very short, inharmonic ring + sharp tick.
+      // Harder hits ring slightly higher (real balls do this), via base-freq lift.
+      tick(4000, 0.004, 0.2 + 0.5*v);
+      modal(2400 + 600*v, [[1,0.6,0.045],[2.76,0.3,0.03],[5.4,0.14,0.018],[8.2,0.07,0.012]], 0.22 + 0.5*v, 0.06);
+      break;
+    case 'cushion':
+      // rubber rail: damped, low, no bright ring (the cushion soaks the highs).
+      tick(800, 0.008, 0.06 + 0.12*v);
+      modal(260, [[1,0.5,0.09],[2.1,0.18,0.05]], 0.12 + 0.32*v, 0.05);
+      break;
+    case 'pocket':
+      // contact tick, then a hollow wooden "thunk" as it drops in.
+      tick(3000, 0.005, 0.25);
+      modal(2200, [[1,0.4,0.03],[3,0.18,0.02]], 0.3, 0.05);
+      setTimeout(()=>modal(190, [[1,0.6,0.16],[2.4,0.2,0.08],[3.9,0.08,0.05]], 0.32, 0.03), 55);
+      break;
     case 'win':     [523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,0.25,0.25,'triangle'), i*110)); break;
     case 'lose':    [392,330,262].forEach((f,i)=>setTimeout(()=>tone(f,0.3,0.2,'sine'), i*150)); break;
   }
