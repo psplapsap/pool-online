@@ -125,9 +125,12 @@ const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
 
 // =========================================================================
-// SOUND — procedural Web Audio (no files; works offline). Physics is host-only,
-// so the host tags streamed snapshots with sound events and both clients play
-// them; the guest dedups by event id so each sound fires exactly once per side.
+// SOUND — REAL recorded samples (WAV) decoded into AudioBuffers and played via
+// Web Audio, so volume scales with impact speed and pitch can vary slightly per
+// hit (so repeats don't sound identical). Physics is host-only, so the host tags
+// streamed snapshots with sound events and both clients play them; the guest
+// dedups by event id so each sound fires exactly once per side.
+// Samples: henshmi/Classic-Pool-Game (MIT) — see CREDITS in README.
 // =========================================================================
 let _audioCtx = null, soundOn = true;
 function audio(){
@@ -135,53 +138,47 @@ function audio(){
     try { _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
     catch(e){ return null; }
   }
-  // browsers start the context 'suspended' until a user gesture
   if (_audioCtx.state === 'suspended') _audioCtx.resume();
   return _audioCtx;
 }
-// MODAL IMPACT — what makes a hard-body collision sound real: a handful of
-// inharmonic partials, each a sine that decays exponentially and very fast.
-// `partials` = [[freqMultiplier, gain, decaySeconds], ...] over a base freq.
-// `spread` adds tiny random pitch jitter so no two hits sound identical (the
-// single biggest reason the old noise-burst version sounded synthetic).
-function modal(baseFreq, partials, vol, spread){
-  const ac = audio(); if (!ac || !soundOn) return;
-  vol = Math.max(0, Math.min(1, vol));
-  if (vol <= 0.001) return;
-  const t0 = ac.currentTime;
-  const jitter = 1 + (Math.random()*2-1) * (spread || 0.04);
-  const out = ac.createGain(); out.gain.value = vol; out.connect(ac.destination);
-  for (const [mult, g, decay] of partials){
-    const o = ac.createOscillator();
-    o.type = 'sine';
-    o.frequency.value = baseFreq * mult * jitter;
-    const env = ac.createGain();
-    // near-instant attack (~0.5ms), then exponential ring-down — the signature
-    // of resin/ivory contact.
-    env.gain.setValueAtTime(0.0001, t0);
-    env.gain.exponentialRampToValueAtTime(g, t0 + 0.0005);
-    env.gain.exponentialRampToValueAtTime(0.0001, t0 + decay);
-    o.connect(env); env.connect(out);
-    o.start(t0); o.stop(t0 + decay + 0.02);
-  }
+
+// Decoded sample buffers, keyed by sound type.
+const SAMPLE_URLS = {
+  cue:     'sounds/Strike.wav',
+  clack:   'sounds/BallsCollide.wav',
+  cushion: 'sounds/Side.wav',
+  pocket:  'sounds/Hole.wav',
+};
+const _buffers = {};
+let _samplesLoaded = false;
+// Fetch + decode all samples once (called after the AudioContext exists / on first gesture).
+async function loadSamples(){
+  if (_samplesLoaded) return;
+  const ac = audio(); if (!ac) return;
+  _samplesLoaded = true;   // guard so we only fetch once
+  await Promise.all(Object.entries(SAMPLE_URLS).map(async ([key, url]) => {
+    try {
+      const res = await fetch(url);
+      const arr = await res.arrayBuffer();
+      _buffers[key] = await ac.decodeAudioData(arr);
+    } catch(e){ /* leave missing; playSample no-ops for that key */ }
+  }));
 }
-// A tiny filtered-noise "tick" transient layered under an impact for the dry
-// contact snap (kept extremely short so it reads as attack, not as a hiss).
-function tick(freq, dur, vol){
+// Play a decoded sample: vol 0..1, rate = playback-speed (pitch) multiplier.
+function playSample(key, vol, rate){
   const ac = audio(); if (!ac || !soundOn) return;
+  const buf = _buffers[key];
+  if (!buf){ return; }                      // not loaded yet — silently skip
   vol = Math.max(0, Math.min(1, vol));
   if (vol <= 0.001) return;
-  const n = Math.max(1, Math.floor(ac.sampleRate * dur));
-  const buf = ac.createBuffer(1, n, ac.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i=0;i<n;i++){ d[i] = (Math.random()*2-1) * Math.pow(1 - i/n, 8); } // very fast decay
-  const src = ac.createBufferSource(); src.buffer = buf;
-  const hp = ac.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=freq;
-  const g = ac.createGain(); g.gain.value=vol;
-  src.connect(hp); hp.connect(g); g.connect(ac.destination);
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = rate || 1;
+  const g = ac.createGain(); g.gain.value = vol;
+  src.connect(g); g.connect(ac.destination);
   src.start();
 }
-// A clean musical tone for the win/lose chimes (not impacts).
+// A clean musical tone for the win/lose chimes (not impacts — kept synthesized).
 function tone(freq, dur, vol, type){
   const ac = audio(); if (!ac || !soundOn) return;
   const o = ac.createOscillator(); o.type = type||'sine'; o.frequency.value = freq;
@@ -193,32 +190,17 @@ function tone(freq, dur, vol, type){
   o.start(); o.stop(ac.currentTime + dur + 0.02);
 }
 // Map a logical sound event {type, v} (v = normalized intensity 0..1) to audio.
+// Slight random pitch (playback-rate) variation keeps repeated hits from sounding
+// identical; harder hits are a touch higher-pitched, like real balls.
 function playSound(ev){
   if (!ev) return;
   const v = ev.v == null ? 0.6 : ev.v;
+  const jit = () => 1 + (Math.random()*2-1)*0.06;   // ±6% pitch
   switch(ev.type){
-    case 'cue':
-      // leather tip on resin: lower, a touch softer, with a dry tick on top.
-      tick(2500, 0.006, 0.18 + 0.25*v);
-      modal(1100, [[1,0.5,0.05],[2.7,0.22,0.035],[5.1,0.1,0.02]], 0.35 + 0.4*v, 0.05);
-      break;
-    case 'clack':
-      // ball-on-ball: bright, very short, inharmonic ring + sharp tick.
-      // Harder hits ring slightly higher (real balls do this), via base-freq lift.
-      tick(4000, 0.004, 0.2 + 0.5*v);
-      modal(2400 + 600*v, [[1,0.6,0.045],[2.76,0.3,0.03],[5.4,0.14,0.018],[8.2,0.07,0.012]], 0.22 + 0.5*v, 0.06);
-      break;
-    case 'cushion':
-      // rubber rail: damped, low, no bright ring (the cushion soaks the highs).
-      tick(800, 0.008, 0.06 + 0.12*v);
-      modal(260, [[1,0.5,0.09],[2.1,0.18,0.05]], 0.12 + 0.32*v, 0.05);
-      break;
-    case 'pocket':
-      // contact tick, then a hollow wooden "thunk" as it drops in.
-      tick(3000, 0.005, 0.25);
-      modal(2200, [[1,0.4,0.03],[3,0.18,0.02]], 0.3, 0.05);
-      setTimeout(()=>modal(190, [[1,0.6,0.16],[2.4,0.2,0.08],[3.9,0.08,0.05]], 0.32, 0.03), 55);
-      break;
+    case 'clack':   playSample('clack',   0.25 + 0.6*v, (0.92 + 0.18*v) * jit()); break; // ball-on-ball
+    case 'cue':     playSample('cue',     0.4  + 0.5*v, (0.95 + 0.10*v) * jit()); break; // cue strike
+    case 'cushion': playSample('cushion', 0.3  + 0.5*v, (0.95)          * jit()); break; // rail
+    case 'pocket':  playSample('pocket',  0.7,          1.0);                     break; // drop in pocket
     case 'win':     [523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,0.25,0.25,'triangle'), i*110)); break;
     case 'lose':    [392,330,262].forEach((f,i)=>setTimeout(()=>tone(f,0.3,0.2,'sine'), i*150)); break;
   }
@@ -349,6 +331,7 @@ function brokerOpened(){ if (_brokerTimer){ clearTimeout(_brokerTimer); _brokerT
 
 document.getElementById('btnCreate').onclick = () => {
   role = 'host'; myPlayer = 0;
+  audio(); loadSamples();   // this click is a user gesture — unlock + preload audio
   const code = randCode();
   setStatus('Setting up room…');
   watchBroker();
@@ -380,6 +363,7 @@ document.getElementById('btnJoin').onclick = () => {
   const code = document.getElementById('codeIn').value.trim().toUpperCase();
   if (code.length < 3) { setStatus('Enter the room code first.'); return; }
   role = 'guest'; myPlayer = 1;
+  audio(); loadSamples();   // user gesture — unlock + preload audio
   setStatus('Connecting…');
   watchBroker();
   peer = new Peer(PEER_OPTS);
@@ -475,7 +459,7 @@ cv.addEventListener('mousemove', e => {
 
 cv.addEventListener('mousedown', e => {
   if (!G) return;
-  audio();                 // unlock/resume the AudioContext on a user gesture
+  audio(); loadSamples();  // unlock/resume the AudioContext + load samples on a user gesture
   const p = pt(e);
   if (G.phase === 'over') return;
 

@@ -58,3 +58,9 @@ It's one static file. Serve it locally with any static server:
 npx http-server -p 8080
 # open http://localhost:8080/index.html in two tabs to test both sides
 ```
+
+## Credits
+
+Sound effects (`sounds/*.wav` — cue strike, ball collision, cushion, pocket) are
+from [henshmi/Classic-Pool-Game](https://github.com/henshmi/Classic-Pool-Game),
+used under the MIT License. Win/lose chimes are synthesized in-browser.
