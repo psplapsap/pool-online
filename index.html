@@ -358,6 +358,7 @@ let conn = null, peer = null;
 let aim = { active:false, angle:0, power:0, dragging:false /* legacy, no longer used */, charging:false, chargeStart:0 };
 let ballInHandPlacing = false;
 let ghost = { x:W*0.25, y:H/2 };   // cursor position for the ball-in-hand placement preview
+const _renderPos = {};             // local smoothed render positions per ball number (not networked)
 // Spin / english: contact point on the cue ball, unit-circle clamped.
 //   sx = side (horizontal, [-1,1]); sy = follow(+)/draw(-) (vertical, [-1,1]).
 let spin = { sx:0, sy:0 };
@@ -1016,10 +1017,19 @@ function draw(){
   vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,.28)');
   ctx.fillStyle=vg; ctx.fillRect(RAIL,RAIL,W-2*RAIL,H-2*RAIL);
 
-  // balls
+  // balls — render at a smoothed position that eases toward the authoritative
+  // (x,y). This absorbs network jitter on the guest and softens motion overall,
+  // giving fluid animation without changing the physics. Render positions live in
+  // a local side-map (keyed by ball number) so they are NOT serialized over the
+  // network. Snap on big jumps (teleport/respawn/ball-in-hand) instead of sliding.
   for (const b of G.balls){
     if (!b.alive) continue;
-    drawBall(b);
+    let r = _renderPos[b.n];
+    if (!r){ r = _renderPos[b.n] = { x:b.x, y:b.y }; }
+    const ddx = b.x - r.x, ddy = b.y - r.y;
+    if (Math.hypot(ddx, ddy) > 60){ r.x = b.x; r.y = b.y; }   // snap
+    else { r.x += ddx * 0.35; r.y += ddy * 0.35; }            // ease (~35%/frame)
+    drawBall(b, r.x, r.y);
   }
 
   // aim line (whoever is aiming)
@@ -1040,29 +1050,34 @@ function draw(){
   }
 }
 
-function drawBall(b){
+function drawBall(b, rx, ry){
+  // rx/ry = smoothed render position (falls back to authoritative x/y)
+  const bx = (rx===undefined?b.x:rx), by = (ry===undefined?b.y:ry);
   ctx.save();
-  ctx.beginPath(); ctx.arc(b.x,b.y,R,0,7);
+  // soft contact shadow for a little depth
+  ctx.beginPath(); ctx.arc(bx+1.5, by+2.5, R, 0, 7);
+  ctx.fillStyle='rgba(0,0,0,.28)'; ctx.fill();
+  ctx.beginPath(); ctx.arc(bx,by,R,0,7);
   if (b.n===0){ ctx.fillStyle='#f6f3ea'; }
   else { ctx.fillStyle = BALLCOL[b.n] || '#ccc'; }
   ctx.fill();
   if (isStripe(b.n)){
     // white stripe band
     ctx.save();
-    ctx.beginPath(); ctx.arc(b.x,b.y,R,0,7); ctx.clip();
+    ctx.beginPath(); ctx.arc(bx,by,R,0,7); ctx.clip();
     ctx.fillStyle='#f6f3ea';
-    ctx.fillRect(b.x-R, b.y-R*0.45, R*2, R*0.9);
+    ctx.fillRect(bx-R, by-R*0.45, R*2, R*0.9);
     ctx.restore();
   }
   // number
   if (b.n!==0){
-    ctx.beginPath(); ctx.arc(b.x,b.y,R*0.5,0,7); ctx.fillStyle='#fff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(bx,by,R*0.5,0,7); ctx.fillStyle='#fff'; ctx.fill();
     ctx.fillStyle='#111'; ctx.font='bold 9px system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.fillText(b.n, b.x, b.y+0.5);
+    ctx.fillText(b.n, bx, by+0.5);
     ctx.textAlign='start'; ctx.textBaseline='alphabetic';
   }
   // shine
-  ctx.beginPath(); ctx.arc(b.x-R*0.3,b.y-R*0.3,R*0.28,0,7);
+  ctx.beginPath(); ctx.arc(bx-R*0.3,by-R*0.3,R*0.28,0,7);
   ctx.fillStyle='rgba(255,255,255,.35)'; ctx.fill();
   ctx.restore();
 }
@@ -1121,23 +1136,64 @@ function drawAim(){
   const ang = a.angle || 0;
   const pw = a.power || 0;
 
-  // projected line until it hits a cushion (simple)
-  let x=cb.x, y=cb.y, dx=Math.cos(ang), dy=Math.sin(ang);
-  let t=0; const maxT=1200; let hx=x, hy=y;
-  for (; t<maxT; t+=4){
-    const nx=cb.x+dx*t, ny=cb.y+dy*t;
-    if (nx<RAIL+R||nx>W-RAIL-R||ny<RAIL+R||ny>H-RAIL-R) break;
-    // stop at first ball
-    let blocked=false;
-    for (const b of G.balls){ if(b.n!==0&&b.alive&&Math.hypot(b.x-nx,b.y-ny)<2*R){blocked=true;break;} }
-    hx=nx; hy=ny;
-    if (blocked) break;
+  // ---- AIM ASSIST ----
+  // Cast a ray from the cue ball along the aim direction and find the FIRST object
+  // ball it would contact (ray vs circle of radius 2R = ghost-ball center). We show
+  // only a limited range: the cue path up to that contact (or a capped distance if
+  // it hits nothing), a ghost ball at the contact point, and a short arrow showing
+  // which way the struck ball will travel. Not a full solver — just a useful hint.
+  const dx=Math.cos(ang), dy=Math.sin(ang);
+  const ASSIST_MAX = 260;          // px: how far ahead we ever draw the guide
+  let bestT = Infinity, target = null;
+  for (const b of G.balls){
+    if (b.n===0 || !b.alive) continue;
+    // solve |cb + t*d - b| = 2R  for smallest t>0
+    const ox = cb.x - b.x, oy = cb.y - b.y;
+    const bq = ox*dx + oy*dy;
+    const cq = ox*ox + oy*oy - (2*R)*(2*R);
+    const disc = bq*bq - cq;
+    if (disc < 0) continue;
+    const t = -bq - Math.sqrt(disc);
+    if (t > 0 && t < bestT){ bestT = t; target = b; }
   }
-  ctx.setLineDash([6,6]); ctx.strokeStyle='rgba(255,255,255,.7)'; ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.moveTo(cb.x,cb.y); ctx.lineTo(hx,hy); ctx.stroke();
+  // also clamp the guide to the cushion if the ray leaves the table sooner
+  let railT = ASSIST_MAX;
+  for (let tt=0; tt<=ASSIST_MAX; tt+=4){
+    const nx=cb.x+dx*tt, ny=cb.y+dy*tt;
+    if (nx<RAIL+R||nx>W-RAIL-R||ny<RAIL+R||ny>H-RAIL-R){ railT=tt; break; }
+  }
+  const guideT = Math.min(bestT, railT, ASSIST_MAX);
+  const gx = cb.x + dx*guideT, gy = cb.y + dy*guideT;   // cue-line endpoint
+
+  // cue-direction guide line (white dashed)
+  ctx.setLineDash([7,7]); ctx.lineWidth=1.6; ctx.strokeStyle='rgba(255,255,255,.75)';
+  ctx.beginPath(); ctx.moveTo(cb.x,cb.y); ctx.lineTo(gx,gy); ctx.stroke();
   ctx.setLineDash([]);
-  // target marker
-  ctx.beginPath(); ctx.arc(hx,hy,R,0,7); ctx.strokeStyle='rgba(255,255,255,.5)'; ctx.stroke();
+
+  if (target && bestT <= railT && bestT <= ASSIST_MAX){
+    // ghost ball at the contact position (where the cue ball's center will be)
+    ctx.beginPath(); ctx.arc(gx,gy,R,0,7);
+    ctx.strokeStyle='rgba(255,255,255,.85)'; ctx.lineWidth=1.6; ctx.stroke();
+    ctx.fillStyle='rgba(255,255,255,.10)'; ctx.fill();
+    // object ball travels along the line from contact point through its center
+    let ix=(target.x-gx), iy=(target.y-gy); const im=Math.hypot(ix,iy)||1; ix/=im; iy/=im;
+    const arrowLen = 46;
+    const ex = target.x + ix*arrowLen, ey = target.y + iy*arrowLen;
+    // colour the deflection arrow to match the target ball
+    const col = target.n===8 ? '#f4f4f4' : (BALLCOL[target.n] || '#36d39a');
+    ctx.strokeStyle=col; ctx.lineWidth=2.4; ctx.globalAlpha=.95;
+    ctx.beginPath(); ctx.moveTo(target.x,target.y); ctx.lineTo(ex,ey); ctx.stroke();
+    // little arrowhead
+    const ah=6, base=Math.atan2(iy,ix);
+    ctx.beginPath(); ctx.moveTo(ex,ey);
+    ctx.lineTo(ex-Math.cos(base-0.4)*ah, ey-Math.sin(base-0.4)*ah);
+    ctx.lineTo(ex-Math.cos(base+0.4)*ah, ey-Math.sin(base+0.4)*ah);
+    ctx.closePath(); ctx.fillStyle=col; ctx.fill();
+    ctx.globalAlpha=1;
+  } else {
+    // no ball in range: just a small endpoint tick on the cue line
+    ctx.beginPath(); ctx.arc(gx,gy,3,0,7); ctx.fillStyle='rgba(255,255,255,.5)'; ctx.fill();
+  }
 
   // power indicator behind cue ball (cue-stick pullback) — reflects oscillating value
   if (pw>0){
