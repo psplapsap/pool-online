@@ -4,67 +4,146 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>8-Ball Pool — Online (P2P)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <style>
-  :root { --felt:#0b6b3a; --felt2:#0a5e33; --wood:#5a3a1b; --gold:#d9b35c; }
+  :root {
+    --felt:#0b6b3a; --felt2:#0a5e33; --wood:#5a3a1b;
+    --gold:#e7c074; --gold2:#f3d99b;
+    --ink:#0a0e14; --panel:rgba(28,34,46,.62); --panel-bd:rgba(255,255,255,.10);
+    --txt:#e8edf6; --muted:#9aa6bb;
+    --accent:#36d39a; --accent2:#2bb3ff;
+  }
   * { box-sizing: border-box; }
-  html,body { margin:0; height:100%; background:#15110d; color:#eee;
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-  #wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:14px; }
-  h1 { margin:4px 0; font-size:20px; letter-spacing:.5px; }
-  h1 span { color:var(--gold); }
-  #lobby { background:#221a12; border:1px solid #3a2c1c; border-radius:12px;
-    padding:18px 20px; max-width:520px; width:100%; }
-  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:8px 0; }
-  button { background:var(--gold); color:#211; border:none; border-radius:8px;
-    padding:9px 14px; font-weight:700; cursor:pointer; font-size:14px; }
-  button:hover { filter:brightness(1.08); }
-  button.secondary { background:#3a2c1c; color:#f1e6d2; }
-  button:disabled { opacity:.45; cursor:not-allowed; }
-  input { background:#15100b; border:1px solid #4a3826; color:#fff; border-radius:8px;
-    padding:9px 12px; font-size:15px; letter-spacing:2px; text-transform:uppercase; width:140px; }
-  .muted { color:#b8a98f; font-size:13px; }
-  code { background:#15100b; padding:2px 8px; border-radius:6px; color:var(--gold);
-    font-size:18px; letter-spacing:3px; user-select:all; }
-  #status { font-size:13px; color:#b8a98f; min-height:18px; }
-  #hud { display:flex; gap:18px; align-items:center; font-size:14px; flex-wrap:wrap;
+  html,body { margin:0; min-height:100%; color:var(--txt);
+    font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased; }
+  /* layered modern background: deep radial glows over a dark gradient */
+  body {
+    background:
+      radial-gradient(900px 600px at 18% -10%, rgba(54,211,154,.16), transparent 60%),
+      radial-gradient(800px 600px at 100% 0%, rgba(43,179,255,.14), transparent 55%),
+      radial-gradient(1000px 800px at 50% 120%, rgba(231,192,116,.10), transparent 60%),
+      linear-gradient(160deg, #0c111b 0%, #0a0e16 45%, #070a11 100%);
+    background-attachment: fixed;
+  }
+  /* faint grid texture overlay for depth */
+  body::before {
+    content:''; position:fixed; inset:0; pointer-events:none; z-index:0; opacity:.5;
+    background-image:
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+    background-size: 46px 46px;
+    mask-image: radial-gradient(circle at 50% 40%, #000 30%, transparent 80%);
+  }
+  #wrap { position:relative; z-index:1; display:flex; flex-direction:column;
+    align-items:center; gap:16px; padding:22px 14px 40px; }
+  h1 { margin:6px 0 2px; font-size:30px; font-weight:800; letter-spacing:-.5px;
+    display:flex; align-items:center; gap:10px; }
+  h1 .logo { filter: drop-shadow(0 2px 8px rgba(0,0,0,.5)); }
+  h1 .title { background:linear-gradient(180deg,#fff, #c8d2e4);
+    -webkit-background-clip:text; background-clip:text; color:transparent; }
+  h1 span.tag { font-size:13px; font-weight:700; letter-spacing:2px; text-transform:uppercase;
+    color:var(--ink); background:linear-gradient(180deg,var(--gold2),var(--gold));
+    padding:4px 10px; border-radius:999px; box-shadow:0 4px 14px rgba(231,192,116,.25); }
+
+  /* glassmorphism panels */
+  #lobby, #spinwrap, .pill, #help {
+    background:var(--panel); border:1px solid var(--panel-bd);
+    backdrop-filter: blur(14px) saturate(120%); -webkit-backdrop-filter: blur(14px) saturate(120%);
+    box-shadow: 0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  #lobby { border-radius:18px; padding:22px 24px; max-width:460px; width:100%; }
+  .lobby-title { font-size:13px; text-transform:uppercase; letter-spacing:2px;
+    color:var(--muted); margin:0 0 12px; font-weight:700; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:10px 0; }
+  .divider { display:flex; align-items:center; gap:10px; color:var(--muted);
+    font-size:12px; letter-spacing:1px; margin:14px 0 8px; }
+  .divider::before, .divider::after { content:''; height:1px; flex:1;
+    background:linear-gradient(90deg, transparent, var(--panel-bd), transparent); }
+
+  button { position:relative; border:none; border-radius:11px; cursor:pointer;
+    padding:11px 18px; font-weight:700; font-size:14px; color:var(--ink);
+    background:linear-gradient(180deg, var(--gold2), var(--gold));
+    box-shadow: 0 6px 18px rgba(231,192,116,.28), inset 0 1px 0 rgba(255,255,255,.4);
+    transition: transform .08s ease, box-shadow .2s ease, filter .2s ease; }
+  button:hover { transform:translateY(-1px); filter:brightness(1.05);
+    box-shadow: 0 10px 26px rgba(231,192,116,.36), inset 0 1px 0 rgba(255,255,255,.5); }
+  button:active { transform:translateY(0); }
+  button.secondary { color:var(--txt);
+    background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.04));
+    border:1px solid var(--panel-bd); box-shadow:inset 0 1px 0 rgba(255,255,255,.06); }
+  button.secondary:hover { background:linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.07)); }
+  button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+  input { background:rgba(0,0,0,.35); border:1px solid var(--panel-bd); color:#fff;
+    border-radius:11px; padding:11px 14px; font-size:16px; letter-spacing:3px;
+    text-transform:uppercase; width:150px; font-weight:700; transition:border .2s, box-shadow .2s; }
+  input:focus { outline:none; border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(54,211,154,.18); }
+  input::placeholder { color:#5d6678; letter-spacing:2px; }
+  .muted { color:var(--muted); font-size:13px; }
+  code { background:rgba(0,0,0,.4); border:1px solid var(--panel-bd); padding:6px 12px;
+    border-radius:9px; color:var(--gold2); font-size:22px; letter-spacing:5px; font-weight:800;
+    user-select:all; }
+  #status { font-size:13px; color:var(--muted); min-height:18px; margin-top:6px;
+    transition:color .2s; }
+
+  #hud { display:flex; gap:12px; align-items:center; font-size:14px; flex-wrap:wrap;
     justify-content:center; }
-  .pill { background:#221a12; border:1px solid #3a2c1c; border-radius:20px; padding:6px 14px; }
-  .you { color:var(--gold); font-weight:700; }
-  #turnmsg { font-weight:700; }
-  canvas { background:var(--felt); border-radius:14px; touch-action:none;
-    box-shadow:0 0 0 16px var(--wood), 0 0 0 18px #2a1a0c, 0 18px 40px rgba(0,0,0,.6); }
+  .pill { border-radius:999px; padding:9px 16px; font-weight:600; display:flex;
+    align-items:center; gap:8px; transition:outline .2s, box-shadow .2s, transform .15s; }
+  #p1pill, #p2pill { min-width:108px; justify-content:center; }
+  .pill.active { outline:2px solid var(--gold); outline-offset:1px;
+    box-shadow:0 0 22px rgba(231,192,116,.35); transform:translateY(-1px); }
+  .you { color:var(--gold2); font-weight:800; }
+  #turnmsg { font-weight:700; letter-spacing:.2px; }
+
+  /* table: richer frame, vignette via box-shadow stack */
+  .table-stage { position:relative; padding:6px; border-radius:24px;
+    background:linear-gradient(145deg,#3a2916,#231708);
+    box-shadow: 0 30px 70px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08); }
+  canvas { display:block; background:var(--felt); border-radius:16px; touch-action:none;
+    box-shadow:0 0 0 14px #4a3320, 0 0 0 16px #1d1206, inset 0 0 90px rgba(0,0,0,.45); }
   .hidden { display:none !important; }
-  .grp { display:inline-flex; gap:4px; align-items:center; }
-  .dot { width:14px; height:14px; border-radius:50%; display:inline-block; border:1px solid #0006; }
-  #help { max-width:760px; font-size:12.5px; color:#9c8f78; line-height:1.5; text-align:center; }
+  .grp { display:inline-flex; gap:5px; align-items:center; font-size:13px; }
+  .dot { width:14px; height:14px; border-radius:50%; display:inline-block;
+    border:1px solid rgba(0,0,0,.4); box-shadow:inset 0 1px 1px rgba(255,255,255,.4); }
+  #help { max-width:780px; font-size:12.5px; color:var(--muted); line-height:1.6;
+    text-align:center; border-radius:14px; padding:12px 18px; }
+  #help b { color:var(--gold2); }
+
   /* spin / english control */
   #controls { display:flex; gap:16px; align-items:center; }
-  #spinwrap { display:flex; gap:12px; align-items:center; background:#221a12;
-    border:1px solid #3a2c1c; border-radius:12px; padding:10px 14px; }
-  #spinpad { position:relative; width:74px; height:74px; border-radius:50%; cursor:crosshair;
-    background:radial-gradient(circle at 36% 32%, #ffffff, #e9e4d6 60%, #c9c3b2 100%);
-    box-shadow:inset 0 0 0 2px #b9b09a, 0 2px 6px #0007; touch-action:none; }
-  #spinpad::before, #spinpad::after { content:''; position:absolute; background:#0002; }
+  #spinwrap { display:flex; gap:14px; align-items:center; border-radius:16px; padding:12px 16px; }
+  #spinpad { position:relative; width:78px; height:78px; border-radius:50%; cursor:crosshair;
+    background:radial-gradient(circle at 36% 30%, #ffffff, #eef0f4 55%, #cfd4dd 100%);
+    box-shadow:inset 0 0 0 2px rgba(0,0,0,.12), inset 0 -6px 14px rgba(0,0,0,.12),
+      0 4px 12px rgba(0,0,0,.4); touch-action:none; }
+  #spinpad::before, #spinpad::after { content:''; position:absolute; background:rgba(0,0,0,.14); }
   #spinpad::before { left:50%; top:8%; width:1px; height:84%; transform:translateX(-.5px); }
   #spinpad::after  { top:50%; left:8%; height:1px; width:84%; transform:translateY(-.5px); }
-  #spindot { position:absolute; width:14px; height:14px; border-radius:50%; background:#e0322b;
-    border:2px solid #fff; box-shadow:0 1px 3px #0008; left:50%; top:50%;
+  #spindot { position:absolute; width:15px; height:15px; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #ff6b6b, #d6271f); border:2px solid #fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.5); left:50%; top:50%;
     transform:translate(-50%,-50%); pointer-events:none; }
-  .ctl-label { font-size:12px; color:#cdbfa3; line-height:1.5; }
-  .ctl-label b { color:var(--gold); }
-  #resetspin { font-size:11px; padding:4px 8px; }
+  .ctl-label { font-size:12px; color:var(--muted); line-height:1.6; }
+  .ctl-label b { color:var(--gold2); }
+  #resetspin { font-size:11px; padding:5px 10px; margin-top:4px; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <h1>🎱 8-Ball Pool <span>· Online</span></h1>
+  <h1><span class="logo">🎱</span> <span class="title">8-Ball Pool</span> <span class="tag">Online</span></h1>
 
   <div id="lobby">
+    <div class="lobby-title">Play with a friend</div>
     <div class="row">
       <button id="btnCreate">Create room</button>
-      <span class="muted">— get a code, share it in Discord</span>
+      <span class="muted">get a code &amp; share it in Discord</span>
     </div>
+    <div class="divider">or join one</div>
     <div class="row">
       <input id="codeIn" placeholder="CODE" maxlength="6" autocomplete="off" />
       <button id="btnJoin" class="secondary">Join room</button>
@@ -80,12 +159,14 @@
     <div class="pill" id="p1pill">P1 <span class="grp" id="p1grp"></span></div>
     <div class="pill"><span id="turnmsg">…</span></div>
     <div class="pill" id="p2pill">P2 <span class="grp" id="p2grp"></span></div>
-    <button id="muteBtn" class="secondary" style="padding:6px 10px" title="Toggle sound">🔊</button>
+    <button id="muteBtn" class="secondary" style="padding:8px 11px" title="Toggle sound">🔊</button>
   </div>
 
-  <canvas id="cv" width="900" height="500"></canvas>
+  <div class="table-stage">
+    <canvas id="cv" width="900" height="500"></canvas>
+  </div>
 
-  <div id="controls"><div id="spinwrap"><div id="spinpad"><div id="spindot"></div></div><div class="ctl-label">Spin / <b>english</b><br>drag the dot<br><button id="resetspin">center</button></div></div></div>
+  <div id="controls"><div id="spinwrap"><div id="spinpad"><div id="spindot"></div></div><div class="ctl-label">Spin / <b>english</b><br>drag the dot<br><button id="resetspin" class="secondary">center</button></div></div></div>
 
   <div id="help" class="hidden">
     Aim with the mouse · press and <b>HOLD</b> on the table to charge the power meter
@@ -904,20 +985,36 @@ requestAnimationFrame(loop);
 // =========================================================================
 function draw(){
   ctx.clearRect(0,0,W,H);
-  // felt + subtle vignette
-  ctx.fillStyle = '#0b6b3a'; ctx.fillRect(0,0,W,H);
-  // cushions
-  ctx.fillStyle = '#0a5e33';
-  ctx.fillRect(RAIL-6,RAIL-6, W-2*RAIL+12, H-2*RAIL+12);
-  ctx.strokeStyle='#063f22'; ctx.lineWidth=2;
+  // felt base with a soft radial sheen (lighter in the middle, darker at edges)
+  const fg = ctx.createRadialGradient(W/2, H/2, 60, W/2, H/2, W*0.62);
+  fg.addColorStop(0, '#138a4a');
+  fg.addColorStop(0.6, '#0c7340');
+  fg.addColorStop(1, '#085c32');
+  ctx.fillStyle = fg; ctx.fillRect(0,0,W,H);
+  // cushion bed (slightly darker inset around the rails)
+  ctx.fillStyle = 'rgba(0,0,0,.10)';
+  ctx.fillRect(RAIL-7,RAIL-7, W-2*RAIL+14, H-2*RAIL+14);
+  ctx.fillStyle = '#0c7340';
+  ctx.fillRect(RAIL,RAIL, W-2*RAIL, H-2*RAIL);
+  // inner playing-field outline (thin gold-ish hairline)
+  ctx.strokeStyle='rgba(255,255,255,.08)'; ctx.lineWidth=2;
   ctx.strokeRect(RAIL,RAIL,W-2*RAIL,H-2*RAIL);
-  // pockets
+  // pockets — dark wells with a soft ring
   for (const p of POCKETS){
-    ctx.beginPath(); ctx.arc(p.x,p.y,POCKET-3,0,7); ctx.fillStyle='#0a0a0a'; ctx.fill();
+    const pg = ctx.createRadialGradient(p.x,p.y,2,p.x,p.y,POCKET);
+    pg.addColorStop(0,'#000'); pg.addColorStop(0.7,'#070707'); pg.addColorStop(1,'rgba(0,0,0,.2)');
+    ctx.beginPath(); ctx.arc(p.x,p.y,POCKET-2,0,7); ctx.fillStyle=pg; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x,p.y,POCKET-2,0,7);
+    ctx.strokeStyle='rgba(0,0,0,.5)'; ctx.lineWidth=2; ctx.stroke();
   }
-  // head line
-  ctx.strokeStyle='rgba(255,255,255,.12)'; ctx.beginPath();
+  // head line + head spot (subtle table markings)
+  ctx.strokeStyle='rgba(255,255,255,.10)'; ctx.lineWidth=1; ctx.beginPath();
   ctx.moveTo(W*0.28,RAIL); ctx.lineTo(W*0.28,H-RAIL); ctx.stroke();
+  ctx.beginPath(); ctx.arc(W*0.68, H/2, 2.2, 0, 7); ctx.fillStyle='rgba(255,255,255,.12)'; ctx.fill();
+  // vignette to give the bed depth
+  const vg = ctx.createRadialGradient(W/2,H/2, H*0.35, W/2,H/2, W*0.7);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,.28)');
+  ctx.fillStyle=vg; ctx.fillRect(RAIL,RAIL,W-2*RAIL,H-2*RAIL);
 
   // balls
   for (const b of G.balls){
@@ -1113,8 +1210,8 @@ function renderHud(){
   const p1=document.getElementById('p1pill'), p2=document.getElementById('p2pill');
   p1.classList.toggle('you', myPlayer===0);
   p2.classList.toggle('you', myPlayer===1);
-  p1.style.outline = G.turn===0 ? '2px solid #d9b35c':'none';
-  p2.style.outline = G.turn===1 ? '2px solid #d9b35c':'none';
+  p1.classList.toggle('active', G.turn===0);
+  p2.classList.toggle('active', G.turn===1);
   document.getElementById('turnmsg').textContent =
     G.message + (G.turn===myPlayer && G.phase==='aim' ? '  (your shot)' : '');
 }
