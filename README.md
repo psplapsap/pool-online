@@ -64,5 +64,5 @@ npx http-server -p 8080
 Sound effects:
 - Cue strike, ball collision, and pocket (`Strike.wav`, `BallsCollide.wav`,
   `Hole.wav`) from [henshmi/Classic-Pool-Game](https://github.com/henshmi/Classic-Pool-Game) (MIT License).
-- Cushion/rail (`hit-cushion.mp3`) from [nour20031/Snooker-Game-JavaScript-p5.js-](https://github.com/nour20031/Snooker-Game-JavaScript-p5.js-).
+- Cushion/rail (`cushion-border.mp3`) from [pxlmvr/three-pool](https://github.com/pxlmvr/three-pool).
 - Win/lose chimes are synthesized in-browser.

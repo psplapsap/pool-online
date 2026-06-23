@@ -146,7 +146,7 @@ function audio(){
 const SAMPLE_URLS = {
   cue:     'sounds/Strike.wav',
   clack:   'sounds/BallsCollide.wav',
-  cushion: 'sounds/hit-cushion.mp3',
+  cushion: 'sounds/cushion-border.mp3',
   pocket:  'sounds/Hole.wav',
 };
 const _buffers = {};
@@ -165,18 +165,37 @@ async function loadSamples(){
   }));
 }
 // Play a decoded sample: vol 0..1, rate = playback-speed (pitch) multiplier.
-function playSample(key, vol, rate){
+// opts.maxDur = cap the played length (s) and fade out — keeps a sample's punchy
+// attack but trims any long reverb tail / dead air that muddies rapid repeats.
+// opts.lp = low-pass cutoff (Hz) to dull the tone (e.g. soften a rail thud).
+function playSample(key, vol, rate, opts){
   const ac = audio(); if (!ac || !soundOn) return;
   const buf = _buffers[key];
   if (!buf){ return; }                      // not loaded yet — silently skip
   vol = Math.max(0, Math.min(1, vol));
   if (vol <= 0.001) return;
+  opts = opts || {};
   const src = ac.createBufferSource();
   src.buffer = buf;
   src.playbackRate.value = rate || 1;
-  const g = ac.createGain(); g.gain.value = vol;
-  src.connect(g); g.connect(ac.destination);
-  src.start();
+  const g = ac.createGain();
+  const t0 = ac.currentTime;
+  g.gain.setValueAtTime(vol, t0);
+  let node = src;
+  if (opts.lp){
+    const lp = ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=opts.lp;
+    src.connect(lp); node = lp;
+  }
+  node.connect(g); g.connect(ac.destination);
+  if (opts.maxDur){
+    // hold, then a short fade so the cut is click-free; stop the source after.
+    const end = t0 + opts.maxDur;
+    g.gain.setValueAtTime(vol, Math.max(t0, end - 0.03));
+    g.gain.exponentialRampToValueAtTime(0.0001, end);
+    src.start(t0); src.stop(end + 0.02);
+  } else {
+    src.start(t0);
+  }
 }
 // A clean musical tone for the win/lose chimes (not impacts — kept synthesized).
 function tone(freq, dur, vol, type){
@@ -199,7 +218,7 @@ function playSound(ev){
   switch(ev.type){
     case 'clack':   playSample('clack',   0.25 + 0.6*v, (0.92 + 0.18*v) * jit()); break; // ball-on-ball
     case 'cue':     playSample('cue',     0.4  + 0.5*v, (0.95 + 0.10*v) * jit()); break; // cue strike
-    case 'cushion': playSample('cushion', 0.3  + 0.5*v, (0.95)          * jit()); break; // rail
+    case 'cushion': playSample('cushion', 0.35 + 0.5*v, (0.9) * jit(), {maxDur:0.18, lp:3500}); break; // rail: short punchy thud, highs softened
     case 'pocket':  playSample('pocket',  0.7,          1.0);                     break; // drop in pocket
     case 'win':     [523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,0.25,0.25,'triangle'), i*110)); break;
     case 'lose':    [392,330,262].forEach((f,i)=>setTimeout(()=>tone(f,0.3,0.2,'sine'), i*150)); break;
