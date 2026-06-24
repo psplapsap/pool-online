@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>8-Ball Pool — Online (P2P)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -19,7 +19,11 @@
   * { box-sizing: border-box; }
   html,body { margin:0; min-height:100%; color:var(--txt);
     font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    -webkit-font-smoothing:antialiased; }
+    -webkit-font-smoothing:antialiased;
+    /* Mobile: stop the page rubber-band-scrolling/bouncing behind the felt during a
+       drag-aim, and kill iOS double-tap zoom + long-press text callouts. */
+    overscroll-behavior:none; -webkit-text-size-adjust:100%;
+    -webkit-touch-callout:none; touch-action:manipulation; }
   /* layered modern background: deep radial glows over a dark gradient */
   body {
     background:
@@ -39,7 +43,7 @@
     mask-image: radial-gradient(circle at 50% 40%, #000 30%, transparent 80%);
   }
   #wrap { position:relative; z-index:1; display:flex; flex-direction:column;
-    align-items:center; gap:16px; padding:22px 14px 40px; }
+    align-items:center; gap:16px; padding:22px 14px 40px; width:100%; max-width:100vw; }
   h1 { margin:6px 0 2px; font-size:30px; font-weight:800; letter-spacing:-.5px;
     display:flex; align-items:center; gap:10px; }
   h1 .logo { filter: drop-shadow(0 2px 8px rgba(0,0,0,.5)); }
@@ -103,9 +107,12 @@
   /* table: richer frame, vignette via box-shadow stack */
   .table-stage { position:relative; padding:6px; border-radius:24px;
     background:linear-gradient(145deg,#3a2916,#231708);
-    box-shadow: 0 30px 70px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08); }
+    box-shadow: 0 30px 70px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08);
+    max-width:100%; }
   canvas { display:block; background:var(--felt); border-radius:16px; touch-action:none;
-    box-shadow:0 0 0 14px #4a3320, 0 0 0 16px #1d1206, inset 0 0 90px rgba(0,0,0,.45); }
+    box-shadow:0 0 0 14px #4a3320, 0 0 0 16px #1d1206, inset 0 0 90px rgba(0,0,0,.45);
+    /* fluid scale: keep the 900x500 internal resolution, fit width responsively */
+    width:900px; max-width:100%; height:auto; aspect-ratio:900 / 500; }
   .hidden { display:none !important; }
   .grp { display:inline-flex; gap:5px; align-items:center; font-size:13px; }
   .dot { width:14px; height:14px; border-radius:50%; display:inline-block;
@@ -131,6 +138,94 @@
   .ctl-label { font-size:12px; color:var(--muted); line-height:1.6; }
   .ctl-label b { color:var(--gold2); }
   #resetspin { font-size:11px; padding:5px 10px; margin-top:4px; }
+
+  /* ---------- disconnect / reconnect banner (overlay on the table) ----------
+     A thin always-available UI layer toggled by the connection handlers. It floats
+     over the canvas (the .table-stage is position:relative) so play state stays
+     visible underneath while we surface link status. */
+  #disconnectBanner {
+    position:absolute; left:50%; top:18px; transform:translateX(-50%);
+    z-index:5; max-width:calc(100% - 28px); display:flex; align-items:center; gap:10px;
+    padding:11px 16px; border-radius:13px; pointer-events:none;
+    font-size:13.5px; font-weight:700; letter-spacing:.2px; color:#fff;
+    background:linear-gradient(180deg, rgba(40,22,22,.92), rgba(28,14,14,.92));
+    border:1px solid rgba(255,120,120,.35);
+    box-shadow:0 12px 32px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
+    backdrop-filter:blur(10px) saturate(120%); -webkit-backdrop-filter:blur(10px) saturate(120%);
+    opacity:0; visibility:hidden; transition:opacity .25s ease, transform .25s ease;
+  }
+  #disconnectBanner.show { opacity:1; visibility:visible; transform:translateX(-50%) translateY(0); }
+  #disconnectBanner:not(.show) { transform:translateX(-50%) translateY(-8px); }
+  /* tone variants */
+  #disconnectBanner.ok {
+    background:linear-gradient(180deg, rgba(18,42,30,.92), rgba(12,30,22,.92));
+    border-color:rgba(54,211,154,.4);
+  }
+  #disconnectBanner.warn {
+    background:linear-gradient(180deg, rgba(46,38,16,.92), rgba(32,26,10,.92));
+    border-color:rgba(231,192,116,.4);
+  }
+  #disconnectBanner .dc-spinner {
+    width:14px; height:14px; flex:0 0 auto; border-radius:50%;
+    border:2px solid rgba(255,255,255,.25); border-top-color:#fff;
+    animation:dcspin .8s linear infinite;
+  }
+  #disconnectBanner.ok .dc-spinner, #disconnectBanner.steady .dc-spinner { display:none; }
+  #disconnectBanner .dc-icon { font-size:15px; line-height:1; }
+  @keyframes dcspin { to { transform:rotate(360deg); } }
+  @media (max-width: 720px) {
+    #disconnectBanner { top:10px; padding:9px 12px; font-size:12px; gap:8px; }
+  }
+
+  /* ---------- in-app rematch button (floats over the game-over overlay) ----------
+     The game-over screen is drawn on the canvas; this real button sits on top of it,
+     vertically below the WIN/LOSE text, so either player can start a fresh game
+     without refreshing. Toggled by the render loop (.hidden) when G.phase==='over'. */
+  #rematchBtn {
+    position:absolute; left:50%; top:62%; transform:translate(-50%,-50%);
+    z-index:6; pointer-events:auto; cursor:pointer;
+    padding:13px 28px; border-radius:13px; font-size:16px; font-weight:800;
+    letter-spacing:.3px; color:#1a1206; border:1px solid rgba(255,255,255,.25);
+    background:linear-gradient(180deg, var(--gold2,#e7c074), var(--gold,#c89a4a));
+    box-shadow:0 14px 34px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.4);
+    animation:rematchPulse 1.6s ease-in-out infinite;
+  }
+  #rematchBtn:hover { filter:brightness(1.06); transform:translate(-50%,-50%) translateY(-1px); }
+  #rematchBtn:active { transform:translate(-50%,-50%) translateY(1px); }
+  @keyframes rematchPulse {
+    0%,100% { box-shadow:0 14px 34px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.4); }
+    50%     { box-shadow:0 14px 34px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.4), 0 0 0 6px rgba(231,192,116,.18); }
+  }
+  @media (max-width: 720px) {
+    #rematchBtn { padding:11px 22px; font-size:14px; top:64%; }
+  }
+
+  /* ---------- mobile-first responsive layout ---------- */
+  @media (max-width: 720px) {
+    #wrap { gap:12px; padding:12px 10px 28px; }
+    h1 { font-size:22px; gap:7px; text-align:center; flex-wrap:wrap; justify-content:center; }
+    h1 span.tag { font-size:11px; padding:3px 8px; letter-spacing:1.5px; }
+    #lobby { padding:18px 16px; border-radius:14px; }
+    .row { margin:8px 0; }
+    /* lighten the chunky wooden frame so the table fits a phone screen */
+    .table-stage { padding:4px; border-radius:16px; }
+    canvas { border-radius:10px;
+      box-shadow:0 0 0 6px #4a3320, 0 0 0 7px #1d1206, inset 0 0 50px rgba(0,0,0,.45); }
+    #hud { gap:7px; font-size:12.5px; width:100%; }
+    .pill { padding:7px 11px; }
+    #p1pill, #p2pill { min-width:0; }
+    /* stack the controls and let the spin pad sit comfortably under the table */
+    #controls { width:100%; justify-content:center; }
+    #spinwrap { padding:10px 14px; }
+    #help { font-size:11.5px; padding:10px 14px; line-height:1.55; }
+    code { font-size:18px; letter-spacing:3px; }
+  }
+  @media (max-width: 420px) {
+    h1 { font-size:19px; }
+    canvas { box-shadow:0 0 0 4px #4a3320, 0 0 0 5px #1d1206, inset 0 0 40px rgba(0,0,0,.45); }
+    .pill { padding:6px 9px; font-size:12px; }
+    input { width:120px; font-size:15px; letter-spacing:2px; }
+  }
 </style>
 </head>
 <body>
@@ -138,19 +233,28 @@
   <h1><span class="logo">🎱</span> <span class="title">8-Ball Pool</span> <span class="tag">Online</span></h1>
 
   <div id="lobby">
-    <div class="lobby-title">Play with a friend</div>
+    <div class="lobby-title">Play 8-ball with a friend</div>
+    <div class="muted" style="margin:-4px 0 12px; line-height:1.5">
+      One device hosts, the other joins. No sign-up — just share a room code or link.
+    </div>
     <div class="row">
       <button id="btnCreate">Create room</button>
-      <span class="muted">get a code &amp; share it in Discord</span>
+      <span class="muted">make a room, then send the code or link to a friend</span>
     </div>
-    <div class="divider">or join one</div>
+    <div class="divider">or join a friend's room</div>
     <div class="row">
-      <input id="codeIn" placeholder="CODE" maxlength="6" autocomplete="off" />
+      <input id="codeIn" placeholder="ROOM CODE" maxlength="6" autocomplete="off" />
       <button id="btnJoin" class="secondary">Join room</button>
     </div>
     <div class="row" id="codeBox" style="display:none">
       <span class="muted">Your room code:</span> <code id="myCode">…</code>
-      <button id="btnCopy" class="secondary" style="padding:6px 10px">Copy</button>
+      <button id="btnCopy" class="secondary" style="padding:6px 10px">Copy code</button>
+      <button id="btnCopyLink" class="secondary" style="padding:6px 10px">Copy link</button>
+    </div>
+    <div class="row" id="shareBox" style="display:none; flex-direction:column; align-items:flex-start; gap:8px">
+      <span class="muted">Or have them scan this to join:</span>
+      <canvas id="qrCanvas" width="132" height="132"
+        style="background:#fff; padding:8px; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,.35)"></canvas>
     </div>
     <div id="status"></div>
   </div>
@@ -164,16 +268,22 @@
 
   <div class="table-stage">
     <canvas id="cv" width="900" height="500"></canvas>
+    <div id="disconnectBanner" role="status" aria-live="polite" aria-hidden="true">
+      <span class="dc-spinner" aria-hidden="true"></span>
+      <span class="dc-icon hidden" aria-hidden="true"></span>
+      <span id="disconnectBannerText">Connection lost</span>
+    </div>
+    <button id="rematchBtn" class="hidden">Rematch ↻</button>
   </div>
 
   <div id="controls"><div id="spinwrap"><div id="spinpad"><div id="spindot"></div></div><div class="ctl-label">Spin / <b>english</b><br>drag the dot<br><button id="resetspin" class="secondary">center</button></div></div></div>
 
   <div id="help" class="hidden">
-    Aim with the mouse · press and <b>HOLD</b> on the table to charge the power meter
-    (it sweeps 0→100→0), release to shoot · drag the spin dot to add follow/draw/english.<br>
-    Aim guide: the <b>white</b> dashed line + ghost ball show where you'll strike, and the
-    colored arrow shows where the <b>object ball</b> will travel.<br>
-    On a foul the other player gets <b>ball-in-hand</b>. Pot the 8-ball last to win — pot it early or scratch on it and you lose.
+    <b>Aim:</b> move your finger or mouse around the table to point the cue.<br>
+    <b>Shoot:</b> press and <b>HOLD</b> on the table to charge the power meter (it sweeps 0→100→0), then let go to fire.<br>
+    <b>Spin:</b> drag the dot on the spin pad to add follow, draw or english.<br>
+    <b>Aim guide:</b> the <b>white</b> dashed line and ghost ball show where you'll strike; the colored arrow shows where the <b>object ball</b> will go.<br>
+    <b>Goal:</b> pot all your group (solids or stripes), then sink the 8-ball to win. Foul and your opponent gets <b>ball-in-hand</b>; pot the 8 early or scratch on it and you lose.
   </div>
 </div>
 
@@ -356,6 +466,9 @@ let G = null;            // authoritative game object (host owns; guest mirrors 
 let role = null;         // 'host' | 'guest'
 let myPlayer = 0;        // 0 = player1, 1 = player2  (host is P1, guest is P2)
 let conn = null, peer = null;
+let myRoomCode = null;   // the room code the guest joined with — kept so we can re-dial on a dropped connection
+let _reconnectTimer = null;  // backoff timer handle for the guest auto-reconnect loop
+let _predictTimer = null;    // guest watchdog: unsticks a predicted phase='sim' if the host never replies
 let aim = { active:false, angle:0, power:0, dragging:false /* legacy, no longer used */, charging:false, chargeStart:0 };
 let ballInHandPlacing = false;
 let ghost = { x:W*0.25, y:H/2 };   // cursor position for the ball-in-hand placement preview
@@ -401,10 +514,266 @@ function freshState() {
 const statusEl = document.getElementById('status');
 function setStatus(t){ statusEl.textContent = t; }
 
+// ---- Disconnect / reconnect banner ---------------------------------------
+// A thin, always-available UI layer floating over the canvas. The connection
+// handlers (host + guest) toggle it so the player always sees link status without
+// reading the lobby's #status line (which is hidden once the game starts).
+//   showDisconnectBanner(text, tone)  tone: 'lost'(default,red+spinner) | 'warn' | 'ok'
+//   hideDisconnectBanner()
+const _dcBanner = document.getElementById('disconnectBanner');
+const _dcBannerText = document.getElementById('disconnectBannerText');
+const _dcBannerIcon = _dcBanner ? _dcBanner.querySelector('.dc-icon') : null;
+let _dcOkTimer = null;
+function showDisconnectBanner(text, tone){
+  if (!_dcBanner) return;
+  if (_dcOkTimer){ clearTimeout(_dcOkTimer); _dcOkTimer = null; }
+  tone = tone || 'lost';
+  _dcBanner.classList.remove('ok','warn','steady');
+  // 'lost' shows the animated spinner (actively reconnecting); 'warn'/'ok' show a
+  // static icon instead so the banner doesn't imply work is in progress.
+  if (tone === 'ok'){ _dcBanner.classList.add('ok','steady'); }
+  else if (tone === 'warn'){ _dcBanner.classList.add('warn','steady'); }
+  if (_dcBannerIcon){
+    const icon = tone === 'ok' ? '✓' : tone === 'warn' ? '⏳' : '';
+    _dcBannerIcon.textContent = icon;
+    _dcBannerIcon.classList.toggle('hidden', !icon);
+  }
+  if (_dcBannerText) _dcBannerText.textContent = text;
+  _dcBanner.classList.add('show');
+  _dcBanner.setAttribute('aria-hidden','false');
+  // An 'ok' (reconnected) banner is transient — auto-dismiss after a moment.
+  if (tone === 'ok') _dcOkTimer = setTimeout(hideDisconnectBanner, 2200);
+}
+function hideDisconnectBanner(){
+  if (!_dcBanner) return;
+  if (_dcOkTimer){ clearTimeout(_dcOkTimer); _dcOkTimer = null; }
+  _dcBanner.classList.remove('show');
+  _dcBanner.setAttribute('aria-hidden','true');
+}
+
 function randCode(){
   const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s=''; for(let i=0;i<4;i++) s+=c[Math.floor(Math.random()*c.length)];
   return s;
+}
+
+/* ---------- shareable room link + QR ----------
+   The host's room is reachable via a URL like  <page>?room=CODE  which, when
+   opened, auto-fills the code and dials the host (see the on-load block at the
+   bottom of this script). We expose a Copy-link button and render a QR code so
+   a friend can just scan it on their phone. The QR encoder below is a small,
+   self-contained byte-mode generator (no external lib / network needed). */
+function roomLink(code){
+  // Build an absolute URL to this page with ?room=CODE, preserving the path but
+  // dropping any existing query/hash so re-shares stay clean.
+  const u = new URL(location.href);
+  u.search = ''; u.hash = '';
+  u.searchParams.set('room', code);
+  return u.href;
+}
+
+/* --- minimal QR Code generator (byte mode, ECC level M, auto version) ---
+   Adapted to be dependency-free. Returns a 2D boolean module matrix. Supports
+   versions 1–10 which comfortably hold a short room URL (<~150 bytes). */
+const QR = (function(){
+  // Galois field tables for Reed–Solomon over GF(256), primitive poly 0x11d.
+  const EXP = new Array(512), LOG = new Array(256);
+  for (let i=0, x=1; i<255; i++){ EXP[i]=x; LOG[x]=i; x<<=1; if (x & 0x100) x^=0x11d; }
+  for (let i=255; i<512; i++) EXP[i]=EXP[i-255];
+  const gfMul = (a,b)=> (a===0||b===0)?0:EXP[LOG[a]+LOG[b]];
+  function rsGenPoly(deg){
+    let p=[1];
+    for (let i=0;i<deg;i++){
+      const np=new Array(p.length+1).fill(0);
+      for (let j=0;j<p.length;j++){ np[j]^=p[j]; np[j+1]^=gfMul(p[j],EXP[i]); }
+      p=np;
+    }
+    return p;
+  }
+  function rsEncode(data, ecLen){
+    const gen=rsGenPoly(ecLen);
+    const res=new Array(ecLen).fill(0);
+    for (let i=0;i<data.length;i++){
+      const factor=data[i]^res[0];
+      res.shift(); res.push(0);
+      for (let j=0;j<gen.length-1;j++) res[j]^=gfMul(gen[j+1],factor);
+    }
+    return res;
+  }
+  // Per-version (1..10) for ECC level M: total codewords, EC codewords/block,
+  // and block group structure [ [numBlocks, dataCodewordsPerBlock], ... ].
+  const VER = {
+    1:{ec:10,grp:[[1,16]]},        2:{ec:16,grp:[[1,28]]},
+    3:{ec:26,grp:[[1,44]]},        4:{ec:18,grp:[[2,32]]},
+    5:{ec:24,grp:[[2,43]]},        6:{ec:16,grp:[[4,27]]},
+    7:{ec:18,grp:[[4,31]]},        8:{ec:22,grp:[[2,38],[2,39]]},
+    9:{ec:22,grp:[[3,36],[2,37]]}, 10:{ec:26,grp:[[4,43],[1,44]]}
+  };
+  const ALIGN = {1:[],2:[6,18],3:[6,22],4:[6,26],5:[6,30],6:[6,34],
+    7:[6,22,38],8:[6,24,42],9:[6,26,46],10:[6,28,50]};
+  // Format info (level M, mask 0..7) — precomputed 15-bit strings.
+  const FORMAT_M = [0x5412,0x5125,0x5E7C,0x5B4B,0x45F9,0x40CE,0x4F97,0x4AA0];
+
+  function dataCapacity(v){ // total data codewords for level M at version v
+    let n=0; VER[v].grp.forEach(([b,d])=> n+=b*d); return n;
+  }
+
+  function build(text){
+    // UTF-8 encode the string to bytes.
+    const bytes = Array.from(new TextEncoder().encode(text));
+    // pick smallest version that fits (byte mode header = 4 bits mode + length).
+    let v=0;
+    for (let cand=1; cand<=10; cand++){
+      const lenBits = cand<10 ? 8 : 16;
+      const need = Math.ceil((4 + lenBits + bytes.length*8)/8);
+      if (need <= dataCapacity(cand)){ v=cand; break; }
+    }
+    if (!v) throw new Error('QR: data too long');
+
+    // --- bitstream ---
+    const bits=[];
+    const push=(val,len)=>{ for (let i=len-1;i>=0;i--) bits.push((val>>i)&1); };
+    push(0b0100,4);                       // byte mode
+    push(bytes.length, v<10?8:16);        // char count
+    bytes.forEach(b=>push(b,8));
+    const cap = dataCapacity(v)*8;
+    push(0, Math.min(4, cap-bits.length)); // terminator
+    while (bits.length%8) bits.push(0);    // pad to byte
+    const dataCW=[];
+    for (let i=0;i<bits.length;i+=8){ let b=0; for(let j=0;j<8;j++) b=(b<<1)|bits[i+j]; dataCW.push(b); }
+    const padBytes=[0xEC,0x11];
+    let pi=0; while (dataCW.length < dataCapacity(v)) dataCW.push(padBytes[pi++%2]);
+
+    // --- split into blocks, compute EC, interleave ---
+    const ecLen=VER[v].ec, blocks=[];
+    let idx=0;
+    VER[v].grp.forEach(([num,dlen])=>{
+      for (let k=0;k<num;k++){
+        const d=dataCW.slice(idx, idx+dlen); idx+=dlen;
+        blocks.push({d, e:rsEncode(d, ecLen)});
+      }
+    });
+    const final=[];
+    const maxD=Math.max(...blocks.map(b=>b.d.length));
+    for (let i=0;i<maxD;i++) blocks.forEach(b=>{ if (i<b.d.length) final.push(b.d[i]); });
+    for (let i=0;i<ecLen;i++) blocks.forEach(b=> final.push(b.e[i]));
+
+    // --- matrix layout ---
+    const size=v*4+17;
+    const m=Array.from({length:size},()=>new Array(size).fill(null)); // null = free
+    const reserved=Array.from({length:size},()=>new Array(size).fill(false));
+    const setF=(r,c,val)=>{ m[r][c]=val?1:0; reserved[r][c]=true; };
+    function placeFinder(r,c){
+      for (let i=-1;i<=7;i++) for (let j=-1;j<=7;j++){
+        const rr=r+i, cc=c+j; if (rr<0||cc<0||rr>=size||cc>=size) continue;
+        const on=(i>=0&&i<=6&&(j===0||j===6))||(j>=0&&j<=6&&(i===0||i===6))||(i>=2&&i<=4&&j>=2&&j<=4);
+        setF(rr,cc,on);
+      }
+    }
+    placeFinder(0,0); placeFinder(0,size-7); placeFinder(size-7,0);
+    // timing patterns
+    for (let i=8;i<size-8;i++){ if (m[6][i]===null) setF(6,i,i%2===0); if (m[i][6]===null) setF(i,6,i%2===0); }
+    // alignment patterns
+    const ap=ALIGN[v];
+    for (let i=0;i<ap.length;i++) for (let j=0;j<ap.length;j++){
+      const r=ap[i], c=ap[j];
+      if (m[r][c]!==null) continue; // skip overlap with finders
+      for (let dr=-2;dr<=2;dr++) for (let dc=-2;dc<=2;dc++){
+        const on=Math.max(Math.abs(dr),Math.abs(dc))!==1;
+        setF(r+dr,c+dc,on);
+      }
+    }
+    // dark module + reserve format areas
+    setF(size-8,8,true);
+    for (let i=0;i<9;i++){ if (m[8][i]===null){m[8][i]=0;reserved[8][i]=true;} if (m[i][8]===null){m[i][8]=0;reserved[i][8]=true;} }
+    for (let i=0;i<8;i++){ if (m[8][size-1-i]===null){m[8][size-1-i]=0;reserved[8][size-1-i]=true;} if (m[size-1-i][8]===null){m[size-1-i][8]=0;reserved[size-1-i][8]=true;} }
+
+    // --- place data with zig-zag ---
+    let bitIdx=0;
+    const dataBits=[];
+    final.forEach(b=>{ for (let i=7;i>=0;i--) dataBits.push((b>>i)&1); });
+    let upward=true;
+    for (let col=size-1; col>0; col-=2){
+      if (col===6) col--; // skip timing column
+      for (let t=0;t<size;t++){
+        const row = upward ? size-1-t : t;
+        for (let dc=0;dc<2;dc++){
+          const cc=col-dc;
+          if (m[row][cc]===null){
+            m[row][cc] = (bitIdx<dataBits.length ? dataBits[bitIdx] : 0);
+            bitIdx++;
+          }
+        }
+      }
+      upward=!upward;
+    }
+
+    // --- mask selection (try all 8, pick lowest penalty) ---
+    const maskFn=[
+      (r,c)=>(r+c)%2===0,(r,c)=>r%2===0,(r,c)=>c%3===0,(r,c)=>(r+c)%3===0,
+      (r,c)=>(Math.floor(r/2)+Math.floor(c/3))%2===0,(r,c)=>((r*c)%2)+((r*c)%3)===0,
+      (r,c)=>(((r*c)%2)+((r*c)%3))%2===0,(r,c)=>(((r+c)%2)+((r*c)%3))%2===0
+    ];
+    function applyMaskAndFormat(maskNo){
+      const out=m.map(row=>row.slice());
+      for (let r=0;r<size;r++) for (let c=0;c<size;c++){
+        if (!reserved[r][c] && maskFn[maskNo](r,c)) out[r][c]^=1;
+      }
+      // place format info
+      const fmt=FORMAT_M[maskNo];
+      const fbits=[]; for (let i=14;i>=0;i--) fbits.push((fmt>>i)&1);
+      // around top-left
+      const tl=[[0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],[8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]];
+      tl.forEach(([r,c],i)=> out[r][c]=fbits[i]);
+      // top-right + bottom-left
+      const other=[[8,size-1],[8,size-2],[8,size-3],[8,size-4],[8,size-5],[8,size-6],[8,size-7],[8,size-8],
+        [size-7,8],[size-6,8],[size-5,8],[size-4,8],[size-3,8],[size-2,8],[size-1,8]];
+      other.forEach(([r,c],i)=> out[r][c]=fbits[i]);
+      return out;
+    }
+    function penalty(g){
+      let p=0;
+      // rule 1: runs of 5+ same color in row/col
+      for (let r=0;r<size;r++){ let run=1; for (let c=1;c<size;c++){ if (g[r][c]===g[r][c-1]){run++; if (run===5)p+=3; else if (run>5)p++;} else run=1; } }
+      for (let c=0;c<size;c++){ let run=1; for (let r=1;r<size;r++){ if (g[r][c]===g[r-1][c]){run++; if (run===5)p+=3; else if (run>5)p++;} else run=1; } }
+      // rule 2: 2x2 blocks
+      for (let r=0;r<size-1;r++) for (let c=0;c<size-1;c++){ const v0=g[r][c]; if (v0===g[r][c+1]&&v0===g[r+1][c]&&v0===g[r+1][c+1]) p+=3; }
+      return p;
+    }
+    let best=null, bestP=Infinity, bestMask=0;
+    for (let mk=0;mk<8;mk++){ const g=applyMaskAndFormat(mk); const pen=penalty(g); if (pen<bestP){bestP=pen;best=g;bestMask=mk;} }
+    return best.map(row=>row.map(x=>x===1));
+  }
+  return { build };
+})();
+
+function renderQR(text, canvas){
+  try {
+    const mods = QR.build(text);
+    const n = mods.length;
+    const ctx = canvas.getContext('2d');
+    const quiet = 4;                       // standard 4-module quiet zone
+    const total = n + quiet*2;
+    const px = Math.max(1, Math.floor(canvas.width / total));
+    const dim = px*total;
+    canvas.width = dim; canvas.height = dim;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0,0,dim,dim);
+    ctx.fillStyle = '#000';
+    for (let r=0;r<n;r++) for (let c=0;c<n;c++){
+      if (mods[r][c]) ctx.fillRect((c+quiet)*px,(r+quiet)*px,px,px);
+    }
+    return true;
+  } catch(_){ return false; }
+}
+
+// Populate the share UI (code box + copy buttons + QR) for the host's room.
+function showRoomShare(code){
+  document.getElementById('myCode').textContent = code;
+  document.getElementById('codeBox').style.display = 'flex';
+  const qr = document.getElementById('qrCanvas');
+  const shareBox = document.getElementById('shareBox');
+  if (renderQR(roomLink(code), qr)) shareBox.style.display = 'flex';
+  else shareBox.style.display = 'none';
 }
 
 // Shared PeerJS options. STUN servers help two players behind home routers
@@ -440,9 +809,8 @@ document.getElementById('btnCreate').onclick = () => {
   peer = new Peer('pool8-' + code, PEER_OPTS);
   peer.on('open', () => {
     brokerOpened();
-    document.getElementById('myCode').textContent = code;
-    document.getElementById('codeBox').style.display = 'flex';
-    setStatus('Room created. Share the code in Discord and wait for your opponent…');
+    showRoomShare(code);
+    setStatus('Room created. Share the code or link (or let them scan the QR) and wait for your opponent…');
   });
   peer.on('error', e => {
     brokerOpened();
@@ -450,9 +818,19 @@ document.getElementById('btnCreate').onclick = () => {
     else setStatus('Error: ' + e.type + ' — try a new room.');
   });
   peer.on('connection', c => {
+    // Always adopt the NEWEST incoming connection on a same-room dial. A WebRTC
+    // DataConnection keeps reporting open===true for many seconds after the remote
+    // peer physically vanished (ICE disconnect detection lags the actual drop), so
+    // refusing a new dial whenever the old conn still "looks" open would silently
+    // block the exact fast-rejoin case this feature exists for. The room code is the
+    // only auth anyway (anonymous peers), so the latest dial wins; we tear the old
+    // one down first so its lingering 'close' handler can't clobber the resumed game.
+    if (conn && conn !== c){ try { conn.close(); } catch(_){} }
     conn = c;
     wireConn();
     conn.on('open', () => {
+      // Guard against a late-open on a connection we've since replaced.
+      if (conn !== c) return;
       if (!G || G.phase === undefined){
         // first time anyone joins → start a fresh game
         setStatus('Opponent connected! You are Player 1 (host).');
@@ -461,6 +839,7 @@ document.getElementById('btnCreate').onclick = () => {
         // a player REJOINED mid-game (they misclicked/left and came back) →
         // keep the board and just resume by re-sending current state.
         setStatus('Opponent reconnected — resuming the game.');
+        showDisconnectBanner('Opponent reconnected — resuming', 'ok');
       }
       startGame();
       sendState();
@@ -472,14 +851,24 @@ document.getElementById('btnJoin').onclick = () => {
   const code = document.getElementById('codeIn').value.trim().toUpperCase();
   if (code.length < 3) { setStatus('Enter the room code first.'); return; }
   role = 'guest'; myPlayer = 1;
+  myRoomCode = code;        // remember it so reconnect() can re-dial the same host
   audio(); loadSamples();   // user gesture — unlock + preload audio
+  guestConnect();
+};
+
+// Guest-side connection establishment, factored out so the auto-reconnect path can
+// reuse the exact same dialing logic. Always dials the room stored in myRoomCode.
+function guestConnect(){
+  if (!myRoomCode) return;
+  // Tear down any stale peer before opening a new one (reconnect re-enters here).
+  if (peer){ try { peer.destroy(); } catch(_){} peer = null; }
   setStatus('Connecting…');
   watchBroker();
   peer = new Peer(PEER_OPTS);
   peer.on('open', () => {
     brokerOpened();
     setStatus('Reaching host…');
-    conn = peer.connect('pool8-' + code, { reliable: true });
+    conn = peer.connect('pool8-' + myRoomCode, { reliable: true });
     wireConn();
     let connected = false;
     conn.on('open', () => {
@@ -492,19 +881,111 @@ document.getElementById('btnJoin').onclick = () => {
   });
   peer.on('error', e => {
     brokerOpened();
-    if (e.type === 'peer-unavailable') setStatus('No room with that code — check it and that the host\'s page is open.');
+    if (e.type === 'peer-unavailable') setStatus('No room with that code — the host may have dropped. Retrying…');
     else setStatus('Error: ' + e.type + ' — check the code.');
   });
-};
+}
+
+// Auto-reconnect for the guest: when the data channel closes mid-game we re-dial
+// the same room with a capped backoff. The host preserves G across reconnects (see
+// its 'connection' handler), so once we re-open the host streams the live state back
+// and play resumes where it left off.
+function reconnect(){
+  if (role !== 'guest' || !myRoomCode) return;
+  if (_reconnectTimer) return;          // a retry is already scheduled — don't stack them
+  let attempt = 0;
+  const tryOnce = () => {
+    _reconnectTimer = null;
+    if (conn && conn.open) return;      // someone already re-established the link
+    attempt++;
+    setStatus('Connection lost — reconnecting (attempt ' + attempt + ')…');
+    showDisconnectBanner('Connection lost — reconnecting (attempt ' + attempt + ')…', 'lost');
+    guestConnect();
+    // If we're still not open after a backoff window, schedule another attempt.
+    const backoff = Math.min(8000, 1000 * Math.pow(2, attempt - 1));   // 1s,2s,4s,8s,8s…
+    _reconnectTimer = setTimeout(() => {
+      if (conn && conn.open){ _reconnectTimer = null; return; }
+      tryOnce();
+    }, backoff);
+  };
+  tryOnce();
+}
 
 document.getElementById('btnCopy').onclick = () => {
   navigator.clipboard?.writeText(document.getElementById('myCode').textContent);
   setStatus('Code copied — paste it in Discord.');
 };
 
+document.getElementById('btnCopyLink').onclick = () => {
+  const link = roomLink(document.getElementById('myCode').textContent);
+  // Prefer the native share sheet on mobile, fall back to clipboard.
+  if (navigator.share && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)){
+    navigator.share({ title: '8-Ball Pool', text: 'Join my pool game!', url: link })
+      .then(()=>setStatus('Invite shared — waiting for your opponent…'))
+      .catch(()=>{ navigator.clipboard?.writeText(link); setStatus('Link copied — send it to your opponent.'); });
+  } else {
+    navigator.clipboard?.writeText(link);
+    setStatus('Link copied — send it to your opponent (they\'ll auto-join).');
+  }
+};
+
+// ---- ?room=CODE auto-join: opening a shared link drops you straight into the room ----
+(function autoJoinFromURL(){
+  let code = null;
+  try { code = new URLSearchParams(location.search).get('room'); } catch(_){}
+  if (!code) return;
+  code = code.trim().toUpperCase().slice(0, 6);
+  if (code.length < 3) return;
+  // Pre-fill the join field so the lobby reflects what we're doing, then dial.
+  const inp = document.getElementById('codeIn');
+  if (inp) inp.value = code;
+  setStatus('Joining room ' + code + ' from invite link…');
+  // Defer one tick so all handlers/elements above are defined; the join click
+  // path needs a user gesture for audio, so we trigger the same flow but tolerate
+  // the audio-unlock being deferred to the first in-game tap.
+  setTimeout(() => {
+    role = 'guest'; myPlayer = 1;
+    myRoomCode = code;
+    try { audio(); loadSamples(); } catch(_){}   // best-effort; may need a later gesture
+    guestConnect();
+  }, 0);
+})();
+
 function wireConn(){
-  conn.on('data', onData);
-  conn.on('close', () => setStatus('Opponent disconnected.'));
+  // Capture the specific connection these handlers belong to. If conn is later
+  // swapped (a rejoin opens a new channel), this closure's 'close'/'error' must NOT
+  // touch shared status — otherwise a stale socket's late close clobbers the resumed
+  // game's UI ("Opponent disconnected." overwriting "resuming the game").
+  const c = conn;
+  c.on('data', onData);
+  // A successful (re)open clears any pending reconnect backoff and dismisses the
+  // disconnect banner (the link is live again).
+  c.on('open', () => {
+    if (_reconnectTimer){ clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    // Only the guest flashes the "reconnected" banner here; the host shows it from
+    // its 'connection' resume branch (so a first-ever join doesn't flash a banner).
+    if (role === 'guest') showDisconnectBanner('Reconnected — resuming', 'ok');
+  });
+  const onGone = () => {
+    if (c !== conn) return;            // a newer connection has taken over — ignore the dead one
+    if (role === 'guest'){
+      // The guest is a thin client — without the host it has nothing to render, so
+      // automatically re-dial the same room instead of stranding the player.
+      setStatus('Opponent disconnected — attempting to reconnect…');
+      showDisconnectBanner('Connection lost — reconnecting…', 'lost');
+      reconnect();
+    } else {
+      // Host keeps the authoritative board (G is preserved), so the opponent can rejoin
+      // with the same room code and resume. Tell the host that's possible rather than
+      // implying the game is over.
+      setStatus('Opponent left — waiting for them to rejoin with the same room code…');
+      showDisconnectBanner('Opponent left — waiting for them to rejoin…', 'warn');
+    }
+  };
+  c.on('close', onGone);
+  // PeerJS also surfaces an 'error' on the connection for some abrupt drops that never
+  // emit 'close'; treat it the same so the host/guest still detect the opponent leaving.
+  c.on('error', onGone);
 }
 
 // Host receives guest input; guest receives state snapshots.
@@ -513,7 +994,8 @@ function onData(msg){
     // All messages here originate from the guest, who is always player index 1 (UI: Player 2).
     if (msg.t === 'shot')      hostHandleShot(msg.angle, msg.power, 1, msg.sx||0, msg.sy||0);
     else if (msg.t === 'place') hostHandlePlace(msg.x, msg.y, 1);
-    else if (msg.t === 'aim')   { G._guestAim = msg; } // for spectating opponent's aim
+    else if (msg.t === 'aim' && G) { G._guestAim = msg; } // for spectating opponent's aim
+    else if (msg.t === 'rematch'){ if (G && G.phase === 'over') hostRematch(); } // guest pressed Rematch
   } else {
     if (msg.t === 'state') { applyState(msg.s); }
     else if (msg.t === 'hostaim' && G){ G._hostAim = { angle:msg.angle, power:msg.power, active:msg.active }; }
@@ -532,7 +1014,37 @@ function streamState(){
   if (role !== 'host' || !conn || !conn.open) return;
   conn.send({ t:'state', s: G });
 }
-function applyState(s){ G = s; playStateSounds(s); startGame(); renderHud(); }  // startGame() is idempotent; guarantees the guest's HUD is visible once state arrives; play any streamed sound events (deduped by id)
+function applyState(s){
+  if (_predictTimer){ clearTimeout(_predictTimer); _predictTimer = null; }  // a fresh authoritative snapshot satisfies (and cancels) any pending prediction watchdog
+  // Guest-side per-game sound latch reset: the host resets _gameOverSounded in
+  // hostRematch(), but the guest only ever receives a fresh board via this path.
+  // Detect leaving the 'over' phase (rematch / new game) and re-arm the win/lose
+  // chime, else from the 2nd game on the guest would stay silent at game over.
+  if (s && s.phase !== 'over' && G && G.phase === 'over') _gameOverSounded = false;
+  G = s; playStateSounds(s); startGame(); renderHud();  // startGame() is idempotent; guarantees the guest's HUD is visible once state arrives; play any streamed sound events (deduped by id)
+}
+
+// ---- In-app rematch -------------------------------------------------------
+// Host is authoritative: it rebuilds a fresh board and streams it. Either side
+// can press Rematch — the guest just asks the host (t:'rematch'); the host both
+// handles its own press and the guest's request through this one path.
+const rematchBtn = document.getElementById('rematchBtn');
+function hostRematch(){
+  if (role !== 'host') return;
+  G = freshState();
+  // reset the per-game sound latches so the next win/lose chime fires again
+  _gameOverSounded = false;
+  _lastSoundId = -1;
+  rematchBtn.classList.add('hidden');
+  renderHud();
+  sendState();
+}
+function requestRematch(){
+  if (!G || G.phase !== 'over') return;
+  if (role === 'host') hostRematch();
+  else if (conn && conn.open) conn.send({ t:'rematch' });
+}
+rematchBtn.onclick = requestRematch;
 
 function startGame(){
   document.getElementById('lobby').classList.add('hidden');
@@ -548,7 +1060,27 @@ function myTurn(){ return G && G.turn === myPlayer && G.phase === 'aim'; }
 
 function cueBall(){ return G.balls.find(b => b.n === 0); }
 
-cv.addEventListener('mousemove', e => {
+// ---- Unified pointer input (mouse + touch + pen) -------------------------
+// We use Pointer Events so a finger on a phone drives the exact same aim /
+// hold-to-charge / ball-in-hand placement path as a mouse. Touch quirks handled:
+//  - preventDefault on the canvas pointer/touch events to stop scroll, pinch-zoom,
+//    long-press context menus and the 300ms tap delay from stealing the gesture.
+//  - track a single active pointerId so a second finger can't start a 2nd charge.
+//  - setPointerCapture so we keep getting moves/up even if the finger slides off
+//    the canvas mid-charge (the window 'mouseup' net does NOT fire for touch).
+let activePointerId = null;
+let _isTouchPointer = false;   // the active gesture came from touch/pen (no hover) → aim-then-charge
+let _chargeHoldTimer = null;   // touch: delays charge start so the first part of the drag is pure aiming
+let _aimWindowStart = 0;       // touch: timestamp the current aim gesture began (caps the re-aim window)
+let _lastAimPt = null;         // touch: last pointer position, to ignore sub-threshold jitter when re-aiming
+const AIM_HOLD_MS = 300;       // hold-still delay before the power meter starts charging
+const AIM_WINDOW_MAX_MS = 900; // after this long aiming, charge starts regardless of finger movement
+const AIM_JITTER_PX = 6;       // movement below this (canvas px) does NOT reset the hold timer
+
+// Cancel a pending touch "hold to start charging" timer.
+function cancelChargeHold(){ if (_chargeHoldTimer){ clearTimeout(_chargeHoldTimer); _chargeHoldTimer = null; } }
+
+function pointerMove(e){
   if (!G) return;
   const p = pt(e);
   ghost.x = p.x; ghost.y = p.y;   // track cursor for the ball-in-hand placement preview
@@ -557,50 +1089,144 @@ cv.addEventListener('mousemove', e => {
   if (!myTurn()) return;
   const cb = cueBall();
   if (!cb || !cb.alive) return;
-  // Aim still tracks the mouse even WHILE charging (re-aim mid-charge).
+  // Aim still tracks the pointer even WHILE charging (re-aim mid-charge).
   // Power no longer comes from drag distance — it is the oscillating charge value (see loop()).
   aim.angle = Math.atan2(p.y - cb.y, p.x - cb.x);
+  // Touch: while the finger is still in the pre-charge aim window, dragging defers the
+  // charge start so the player can line up the shot first. Two guards keep this from
+  // making the shot un-fireable (the old bug): (1) tiny finger jitter below
+  // AIM_JITTER_PX does NOT re-arm, so a near-still finger still charges; (2) the
+  // re-aim window is capped at AIM_WINDOW_MAX_MS, after which charging begins no
+  // matter what, so a continuously-moving finger can always fire.
+  if (_isTouchPointer && !aim.charging && _chargeHoldTimer !== null){
+    const moved = !_lastAimPt || Math.hypot(p.x - _lastAimPt.x, p.y - _lastAimPt.y) >= AIM_JITTER_PX;
+    const windowOpen = (performance.now() - _aimWindowStart) < AIM_WINDOW_MAX_MS;
+    if (moved && windowOpen){
+      _lastAimPt = { x:p.x, y:p.y };
+      cancelChargeHold();
+      _chargeHoldTimer = setTimeout(beginCharge, AIM_HOLD_MS);
+    }
+    sendAim();
+    return;
+  }
   // While charging, the throttled loop() path (every 3rd frame) is the SOLE emitter
-  // so a fast mouse can't flood the channel with one packet per mousemove. When idle
+  // so a fast pointer can't flood the channel with one packet per move. When idle
   // (not charging) we still stream live aim so the opponent sees the cue track.
   if (!aim.charging) sendAim();
-});
+}
 
-cv.addEventListener('mousedown', e => {
+function pointerDown(e){
   if (!G) return;
+  // Ignore a second simultaneous touch — only the first pointer drives the shot.
+  if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
   audio(); loadSamples();  // unlock/resume the AudioContext + load samples on a user gesture
   const p = pt(e);
+  // Touch needs an explicit move-to-here first: unlike a mouse there's no hover,
+  // so the very first contact also sets the aim/placement target this frame.
+  ghost.x = p.x; ghost.y = p.y;
   if (G.phase === 'over') return;
 
   if (G.ballInHand && G.turn === myPlayer){
     // place cue ball at a legal empty spot
     if (canPlaceCue(p.x, p.y)){
       if (role === 'host') hostHandlePlace(p.x, p.y);
-      else conn.send({ t:'place', x:p.x, y:p.y });
+      else if (conn && conn.open) conn.send({ t:'place', x:p.x, y:p.y });
     }
     return;
   }
   if (!myTurn()) return;
-  // Start hold-to-oscillate charging. Power is driven per-frame in loop().
+  // For touch/pen, the down also establishes aim direction (no prior hover move).
+  const cb = cueBall();
+  if (cb && cb.alive) aim.angle = Math.atan2(p.y - cb.y, p.x - cb.x);
+  // Keep receiving move/up even if the finger slides off the canvas mid-charge.
+  if (e.pointerId !== undefined && cv.setPointerCapture){
+    activePointerId = e.pointerId;
+    try { cv.setPointerCapture(e.pointerId); } catch(_){}
+  }
+  // Touch/pen has no hover, so aim and charge can't be separate gestures the way a
+  // mouse (hover-to-aim, press-to-charge) gets them for free. To avoid the fused
+  // "aim is locked to wherever I first tapped AND the meter is already sweeping"
+  // problem, touch enters an AIM window first: drag to line up the shot, then HOLD
+  // still and the charge starts after a short delay (re-armed on every drag move).
+  // Pointer Events carry pointerType; the legacy touch fallback sets _isTouchPointer=true
+  // before calling us (a Touch object has no pointerType) — preserve that.
+  if (e.pointerType !== undefined) _isTouchPointer = (e.pointerType === 'touch' || e.pointerType === 'pen');
+  aim.active = true;
+  aim.power = 0;
+  if (_isTouchPointer){
+    cancelChargeHold();
+    _aimWindowStart = performance.now();
+    _lastAimPt = { x:p.x, y:p.y };
+    _chargeHoldTimer = setTimeout(beginCharge, AIM_HOLD_MS);
+    sendAim();
+    return;
+  }
+  // Mouse/pen-with-hover or legacy: start hold-to-oscillate charging immediately.
+  beginCharge();
+}
+
+// Actually begin the oscillating power charge. Power is driven per-frame in loop().
+function beginCharge(){
+  _chargeHoldTimer = null;
+  if (!G || !myTurn()) return;
+  const cb = cueBall();
+  if (!cb || !cb.alive) return;
   aim.charging = true;
   aim.active = true;
   aim.chargeStart = performance.now();
   aim.power = 0;
-});
+  sendAim();
+}
 
-window.addEventListener('mouseup', () => {
+// Guest-only: arm a watchdog after an optimistic phase='sim' prediction. If no
+// authoritative snapshot lands within the grace window, retry the shot once; if it
+// STILL doesn't land, revert locally to 'aim' so the guest can never soft-lock.
+function armPredictWatchdog(shotMsg){
+  if (_predictTimer){ clearTimeout(_predictTimer); _predictTimer = null; }
+  let retried = false;
+  const check = () => {
+    _predictTimer = null;
+    if (!G || G.phase !== 'sim') return;     // host already streamed real state — all good
+    if (!retried && conn && conn.open){
+      retried = true;
+      try { conn.send(shotMsg); } catch(_){}  // packet may have been dropped — send once more
+      _predictTimer = setTimeout(check, 1500);
+      return;
+    }
+    // No reply after a retry (or the link is down): unstick so the player can act.
+    if (G.phase === 'sim'){ G.phase = 'aim'; renderHud(); }
+  };
+  _predictTimer = setTimeout(check, 1500);
+}
+
+// Shared release logic for both pointerup and the window mouseup/blur safety nets.
+function releaseCharge(){
+  // Lifting during the touch AIM window (before the charge ever started) is just a
+  // tap to set up the shot — confirm the aim, fire nothing.
+  if (_chargeHoldTimer !== null){
+    cancelChargeHold();
+    aim.active = false; aim.power = 0;
+    sendAim();
+    return;
+  }
   if (!G || !aim.charging) return;
   aim.charging = false;
   if (aim.power > 0.4 && myTurn()){
-    const shot = { angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy };
-    if (role === 'host') hostHandleShot(shot.angle, shot.power, 0, spin.sx, spin.sy);
-    else {
+    if (role === 'host') hostHandleShot(aim.angle, aim.power, 0, spin.sx, spin.sy);
+    else if (conn && conn.open){
       conn.send({ t:'shot', angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy });
       // Client prediction lock: the host won't flip our local G.phase until its next
       // snapshot returns (tens of ms over WebRTC). Optimistically mark 'sim' now so
       // myTurn() is false and we can't re-charge / send a phantom second shot in the gap.
       // applyState() overwrites G wholesale when the authoritative state arrives.
       G.phase = 'sim';
+      // Watchdog: if the host never streams a snapshot back (shot packet dropped, or
+      // the host rejected it before our resync reply could arrive), we'd be frozen in
+      // 'sim' forever — no input accepted, no physics on the guest. After a grace
+      // window, re-send the shot once and (failing a reply) revert to 'aim' so the
+      // player is never permanently stuck and can retry.
+      const shotMsg = { t:'shot', angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy };
+      armPredictWatchdog(shotMsg);
     }
     aim.power = 0; aim.active = false;
     setSpin(0,0);          // per-shot UI reset — match the host-cleared server state
@@ -610,14 +1236,49 @@ window.addEventListener('mouseup', () => {
     aim.power = 0; aim.active = false;
     sendAim();
   }
+}
+
+function pointerUp(e){
+  if (e && e.pointerId !== undefined){
+    if (activePointerId !== null && e.pointerId !== activePointerId) return;
+    if (cv.releasePointerCapture){ try { cv.releasePointerCapture(e.pointerId); } catch(_){} }
+    activePointerId = null;
+  }
+  releaseCharge();
+}
+
+if (window.PointerEvent){
+  cv.addEventListener('pointermove', pointerMove);
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); pointerDown(e); });
+  cv.addEventListener('pointerup', e => { e.preventDefault(); pointerUp(e); });
+  cv.addEventListener('pointercancel', pointerUp);
+} else {
+  // Legacy fallback: mouse events + raw touch events on browsers without Pointer Events.
+  cv.addEventListener('mousemove', pointerMove);
+  cv.addEventListener('mousedown', pointerDown);
+  cv.addEventListener('touchmove',  e => { e.preventDefault(); if (e.touches[0]) pointerMove(e.touches[0]); }, { passive:false });
+  cv.addEventListener('touchstart', e => { e.preventDefault(); if (e.touches[0]){ _isTouchPointer = true; pointerDown(e.touches[0]); } }, { passive:false });
+  cv.addEventListener('touchend',   e => { e.preventDefault(); pointerUp(e.changedTouches[0]); }, { passive:false });
+  cv.addEventListener('touchcancel',e => { pointerUp(e.changedTouches[0]); });
+}
+// Block long-press context menu / text selection callouts on the canvas (mobile).
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('mouseup', () => {
+  // Pointer Events already handled the release via pointerup; only act as a net
+  // for the legacy mouse-only path (pointer-up outside the canvas etc.).
+  if (window.PointerEvent && activePointerId !== null) return;
+  releaseCharge();
 });
 
-// Safety net: if the pointer-up happens outside the browser window the window
-// 'mouseup' above may never fire, leaving aim.charging stuck (the meter would
-// oscillate forever). On blur, deterministically resolve any held charge —
-// cancel it (no surprise shot the player can't see committing).
+// Safety net: if the pointer-up happens outside the browser window the events
+// above may never fire, leaving aim.charging stuck (the meter would oscillate
+// forever). On blur, deterministically resolve any held charge — cancel it
+// (no surprise shot the player can't see committing).
 window.addEventListener('blur', () => {
-  if (!G || !aim.charging) return;
+  cancelChargeHold();          // drop any pending touch "hold-to-charge" timer too
+  if (!G || !aim.charging){ if (aim.active){ aim.active = false; aim.power = 0; sendAim(); } return; }
+  activePointerId = null;
   aim.charging = false;
   aim.power = 0; aim.active = false;
   sendAim();
@@ -638,7 +1299,9 @@ function sendAim(){
 
 function pt(e){
   const r = cv.getBoundingClientRect();
-  return { x:(e.clientX-r.left)*(W/r.width), y:(e.clientY-r.top)*(H/r.height) };
+  // Accept a mouse/pointer event, or a Touch object (legacy touch fallback).
+  const src = (e && e.clientX === undefined && e.touches && e.touches[0]) ? e.touches[0] : e;
+  return { x:(src.clientX-r.left)*(W/r.width), y:(src.clientY-r.top)*(H/r.height) };
 }
 
 // =========================================================================
@@ -718,11 +1381,15 @@ function hostHandlePlace(x,y,fromPlayer){
 
 function hostHandleShot(angle, power, fromPlayer, sx, sy){
   const src = (fromPlayer===undefined) ? 0 : fromPlayer;
-  if (G.turn !== src) return;          // authoritative: reject out-of-turn shots
-  if (G.phase !== 'aim') return;
-  if (G.ballInHand) return;            // must place cue ball before shooting
+  // If we reject this shot, the guest may have optimistically locked itself into
+  // phase='sim' (client-prediction lock in releaseCharge). It only unsticks when a
+  // fresh authoritative snapshot arrives — so on every rejection, re-send the current
+  // state so the guest resyncs instead of soft-locking forever.
+  if (G.turn !== src){ sendState(); return; }   // authoritative: reject out-of-turn shots
+  if (G.phase !== 'aim'){ sendState(); return; }
+  if (G.ballInHand){ sendState(); return; }      // must place cue ball before shooting
   const cb = cueBall();
-  if (!cb.alive) return;
+  if (!cb.alive){ sendState(); return; }
   cb.vx = Math.cos(angle) * power;
   cb.vy = Math.sin(angle) * power;
   emitSound('cue', power / MAX_POWER);   // cue-stick strike, louder on harder shots
@@ -1053,8 +1720,10 @@ function draw(){
     ctx.fillText(won ? 'YOU WIN! 🏆' : 'You lose 😞', W/2, H/2-10);
     ctx.font='15px system-ui'; ctx.fillStyle='#d9b35c';
     ctx.fillText(G.message, W/2, H/2+22);
-    if (role==='host') ctx.fillText('(host: refresh both pages for a rematch)', W/2, H/2+46);
     ctx.textAlign='start';
+    rematchBtn.classList.remove('hidden');   // surface the in-app rematch control
+  } else {
+    rematchBtn.classList.add('hidden');
   }
 }
 
