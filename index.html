@@ -111,8 +111,12 @@
     max-width:100%; }
   canvas { display:block; background:var(--felt); border-radius:16px; touch-action:none;
     box-shadow:0 0 0 14px #4a3320, 0 0 0 16px #1d1206, inset 0 0 90px rgba(0,0,0,.45);
-    /* fluid scale: keep the 900x500 internal resolution, fit width responsively */
-    width:900px; max-width:100%; height:auto; aspect-ratio:900 / 500; }
+    /* Fluid scale at native 900x500 aspect. Cap by BOTH the available width AND the
+       viewport height so the whole table is always fully visible (no cut-off) — the
+       16px frame inset is accounted for so the wooden border never spills off-screen. */
+    aspect-ratio:900 / 500;
+    width:min(900px, calc(100vw - 56px), calc((100svh - 280px) * 1.8));
+    height:auto; max-width:100%; }
   .hidden { display:none !important; }
   .grp { display:inline-flex; gap:5px; align-items:center; font-size:13px; }
   .dot { width:14px; height:14px; border-radius:50%; display:inline-block;
@@ -210,7 +214,9 @@
     /* lighten the chunky wooden frame so the table fits a phone screen */
     .table-stage { padding:4px; border-radius:16px; }
     canvas { border-radius:10px;
-      box-shadow:0 0 0 6px #4a3320, 0 0 0 7px #1d1206, inset 0 0 50px rgba(0,0,0,.45); }
+      box-shadow:0 0 0 6px #4a3320, 0 0 0 7px #1d1206, inset 0 0 50px rgba(0,0,0,.45);
+      /* thinner frame (12px) + less vertical chrome reserved on phones */
+      width:min(900px, calc(100vw - 28px), calc((100svh - 230px) * 1.8)); }
     #hud { gap:7px; font-size:12.5px; width:100%; }
     .pill { padding:7px 11px; }
     #p1pill, #p2pill { min-width:0; }
@@ -803,8 +809,20 @@ function brokerOpened(){ if (_brokerTimer){ clearTimeout(_brokerTimer); _brokerT
 document.getElementById('btnCreate').onclick = () => {
   role = 'host'; myPlayer = 0;
   audio(); loadSamples();   // this click is a user gesture — unlock + preload audio
-  const code = randCode();
-  setStatus('Setting up room…');
+  // If the host typed a code (e.g. reclaiming the room they just left), reuse it;
+  // otherwise mint a fresh one.
+  const typed = (document.getElementById('codeIn').value || '').trim().toUpperCase().slice(0,6);
+  const code = (typed.length >= 3) ? typed : randCode();
+  hostStartRoom(code, 0);
+};
+
+// Register as the host for `code`. The PeerJS broker keeps a vanished peer's ID
+// reserved for ~30-60s, so reclaiming the SAME room right after quitting fails with
+// 'unavailable-id'. Instead of dead-ending, retry a few times with a short backoff
+// (and destroy any half-open peer first) so the host CAN rejoin their own room.
+function hostStartRoom(code, attempt){
+  if (peer){ try { peer.destroy(); } catch(_){} peer = null; }
+  setStatus(attempt ? `Reclaiming room ${code}… (the previous session is still clearing, retrying)` : 'Setting up room…');
   watchBroker();
   peer = new Peer('pool8-' + code, PEER_OPTS);
   peer.on('open', () => {
@@ -814,8 +832,16 @@ document.getElementById('btnCreate').onclick = () => {
   });
   peer.on('error', e => {
     brokerOpened();
-    if (e.type === 'unavailable-id') setStatus('That room code is taken — click Create again for a new one.');
-    else setStatus('Error: ' + e.type + ' — try a new room.');
+    if (e.type === 'unavailable-id'){
+      if (attempt < 8){
+        // broker still holds the stale id — wait and retry the SAME code
+        setTimeout(() => hostStartRoom(code, attempt+1), 4000);
+      } else {
+        setStatus('Room ' + code + ' is still busy from your last session — wait ~30s and Create again, or clear the code box for a new room.');
+      }
+    } else {
+      setStatus('Error: ' + e.type + ' — try again.');
+    }
   });
   peer.on('connection', c => {
     // Always adopt the NEWEST incoming connection on a same-room dial. A WebRTC
@@ -1858,16 +1884,25 @@ function drawAim(){
     let ix=(target.x-gx), iy=(target.y-gy); const im=Math.hypot(ix,iy)||1; ix/=im; iy/=im;
     const arrowLen = 130;
     const ex = target.x + ix*arrowLen, ey = target.y + iy*arrowLen;
-    // colour the guide to match the target ball, but kept translucent
-    const col = target.n===8 ? '#f4f4f4' : (BALLCOL[target.n] || '#36d39a');
-    ctx.strokeStyle=col; ctx.lineWidth=2; ctx.globalAlpha=.45; ctx.setLineDash([8,7]);
+    // Colour the guide to match the target ball — but dark/blue balls vanish on green
+    // felt, so use a bright high-contrast colour and a dark underlay stroke so the
+    // arrow is clearly visible regardless of the ball's hue.
+    let col = target.n===8 ? '#ffffff' : (BALLCOL[target.n] || '#36d39a');
+    // lift very dark / blue balls toward a brighter, more legible tint
+    if (target.n===2 || target.n===10 || target.n===4 || target.n===12 || target.n===8){
+      col = '#7fe0ff';   // bright cyan reads well on felt for blue/purple/8
+    }
+    const base=Math.atan2(iy,ix), ah=9;
+    // dark underlay for contrast
+    ctx.lineWidth=5; ctx.globalAlpha=.35; ctx.strokeStyle='#06140c';
     ctx.beginPath(); ctx.moveTo(target.x,target.y); ctx.lineTo(ex,ey); ctx.stroke();
-    ctx.setLineDash([]);
-    // soft arrowhead
-    const ah=7, base=Math.atan2(iy,ix);
+    // bright solid arrow on top
+    ctx.globalAlpha=.95; ctx.lineWidth=3; ctx.strokeStyle=col;
+    ctx.beginPath(); ctx.moveTo(target.x,target.y); ctx.lineTo(ex,ey); ctx.stroke();
+    // filled arrowhead
     ctx.beginPath(); ctx.moveTo(ex,ey);
-    ctx.lineTo(ex-Math.cos(base-0.4)*ah, ey-Math.sin(base-0.4)*ah);
-    ctx.lineTo(ex-Math.cos(base+0.4)*ah, ey-Math.sin(base+0.4)*ah);
+    ctx.lineTo(ex-Math.cos(base-0.42)*ah, ey-Math.sin(base-0.42)*ah);
+    ctx.lineTo(ex-Math.cos(base+0.42)*ah, ey-Math.sin(base+0.42)*ah);
     ctx.closePath(); ctx.fillStyle=col; ctx.fill();
     ctx.globalAlpha=1;
   } else {
