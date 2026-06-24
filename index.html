@@ -786,20 +786,25 @@ function showRoomShare(code){
 // (NAT) establish a direct WebRTC link. The signaling still goes through the
 // default free PeerJS broker — if that broker is blocked (e.g. a corporate
 // network), peer.on('open') never fires and we surface a clear warning.
+// TURN is REQUIRED for many real-world pairings (mobile carrier networks, symmetric
+// NAT, routers that block hairpinning) where STUN alone can't punch a direct path —
+// that's why web<->phone often won't connect. Reliable *free, no-signup* TURN is
+// scarce now (OpenRelay's old openrelayproject endpoints are dead), so we use
+// freestun.net (currently free) and STILL prefer a direct/STUN path when one exists.
+// For rock-solid reliability, drop your own Metered/Cloudflare TURN creds into
+// localStorage 'pool_turn' as JSON [{urls,username,credential},...] and they're used.
+let _extraTurn = [];
+try { const s = localStorage.getItem('pool_turn'); if (s) _extraTurn = JSON.parse(s); } catch(_){}
 const PEER_OPTS = {
   debug: 1,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:global.stun.twilio.com:3478' },
-      // TURN relays — REQUIRED for many real-world cases (mobile carrier networks,
-      // symmetric NAT, routers that block hairpinning). STUN alone fails there, which
-      // is why web<->phone often couldn't connect. These are the free public OpenRelay
-      // (Metered) servers; if a direct/STUN path exists it's still used first, TURN is
-      // only the fallback relay.
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'stun:freestun.net:3478' },
+      { urls: 'turn:freestun.net:3478', username: 'free', credential: 'free' },
+      ...(_extraTurn || []),
     ],
   },
 };
@@ -1024,6 +1029,25 @@ function wireConn(){
   // game's UI ("Opponent disconnected." overwriting "resuming the game").
   const c = conn;
   c.on('data', onData);
+  // ICE diagnostics: surface WHY a connection won't establish instead of hanging
+  // silently. 'failed' almost always means no working relay (need TURN) between two
+  // NATs — the classic web<->mobile failure. We watch the underlying RTCPeerConnection.
+  const watchIce = () => {
+    const pc = c.peerConnection;
+    if (!pc) { setTimeout(watchIce, 300); return; }   // PeerJS sets it slightly after connect()
+    pc.oniceconnectionstatechange = () => {
+      const st = pc.iceConnectionState;
+      if (st === 'failed'){
+        setStatus('⚠ Could not establish a direct link (NAT/firewall). This pairing needs a TURN relay — see the note in the lobby.');
+        showDisconnectBanner('Network blocked the connection (needs TURN relay)', 'warn');
+      } else if (st === 'checking'){
+        setStatus('Negotiating connection…');
+      } else if (st === 'disconnected'){
+        setStatus('Connection interrupted — retrying…');
+      }
+    };
+  };
+  watchIce();
   // A successful (re)open clears any pending reconnect backoff and dismisses the
   // disconnect banner (the link is live again).
   c.on('open', () => {
