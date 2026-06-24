@@ -792,6 +792,14 @@ const PEER_OPTS = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:global.stun.twilio.com:3478' },
+      // TURN relays — REQUIRED for many real-world cases (mobile carrier networks,
+      // symmetric NAT, routers that block hairpinning). STUN alone fails there, which
+      // is why web<->phone often couldn't connect. These are the free public OpenRelay
+      // (Metered) servers; if a direct/STUN path exists it's still used first, TURN is
+      // only the fallback relay.
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
     ],
   },
 };
@@ -822,6 +830,9 @@ document.getElementById('btnCreate').onclick = () => {
 // (and destroy any half-open peer first) so the host CAN rejoin their own room.
 function hostStartRoom(code, attempt){
   if (peer){ try { peer.destroy(); } catch(_){} peer = null; }
+  // If we arrived via a ?room= link, clear it so a future reload doesn't bounce the
+  // host back into the (now dead) guest auto-join path.
+  try { if (location.search) history.replaceState(null, '', location.pathname); } catch(_){}
   setStatus(attempt ? `Reclaiming room ${code}… (the previous session is still clearing, retrying)` : 'Setting up room…');
   watchBroker();
   peer = new Peer('pool8-' + code, PEER_OPTS);
@@ -907,9 +918,38 @@ function guestConnect(){
   });
   peer.on('error', e => {
     brokerOpened();
-    if (e.type === 'peer-unavailable') setStatus('No room with that code — the host may have dropped. Retrying…');
-    else setStatus('Error: ' + e.type + ' — check the code.');
+    if (e.type === 'peer-unavailable'){
+      // No host is currently registered for this room. In a host-authoritative P2P
+      // game the board lives in the host's tab, so if the host left there's nothing
+      // to rejoin — but either player can re-establish the room under the same code.
+      // Offer that instead of a dead end.
+      setStatus('No active host for room ' + myRoomCode + '. If you were the host, re-host it; otherwise wait for the host to reopen.');
+      showRehostOption(myRoomCode);
+    } else {
+      setStatus('Error: ' + e.type + ' — check the code.');
+    }
   });
+}
+
+// Surface a one-tap "Host this room" button so whoever returns first can re-create
+// the room under the same code (the other side's auto-reconnect will then find them).
+function showRehostOption(code){
+  let btn = document.getElementById('rehostBtn');
+  if (!btn){
+    btn = document.createElement('button');
+    btn.id = 'rehostBtn';
+    btn.textContent = 'Host room ' + code + ' instead';
+    btn.style.cssText = 'margin-top:8px';
+    const status = document.getElementById('status');
+    if (status && status.parentNode) status.parentNode.insertBefore(btn, status.nextSibling);
+  }
+  btn.onclick = () => {
+    if (peer){ try { peer.destroy(); } catch(_){} peer = null; }
+    if (_reconnectTimer){ clearTimeout(_reconnectTimer); _reconnectTimer = null; }
+    btn.remove();
+    role = 'host'; myPlayer = 0;
+    hostStartRoom(code, 0);
+  };
 }
 
 // Auto-reconnect for the guest: when the data channel closes mid-game we re-dial
