@@ -788,11 +788,11 @@ function showRoomShare(code){
 // network), peer.on('open') never fires and we surface a clear warning.
 // TURN is REQUIRED for many real-world pairings (mobile carrier networks, symmetric
 // NAT, routers that block hairpinning) where STUN alone can't punch a direct path —
-// that's why web<->phone often won't connect. Reliable *free, no-signup* TURN is
-// scarce now (OpenRelay's old openrelayproject endpoints are dead), so we use
-// freestun.net (currently free) and STILL prefer a direct/STUN path when one exists.
-// For rock-solid reliability, drop your own Metered/Cloudflare TURN creds into
-// localStorage 'pool_turn' as JSON [{urls,username,credential},...] and they're used.
+// that's why web<->phone often won't connect. We use a dedicated Metered TURN account
+// (free tier) so cross-device play works reliably; a direct/STUN path is still
+// preferred when one exists, with TURN (incl. TCP/443 for restrictive firewalls) as
+// the fallback relay. You can still override/extend via localStorage 'pool_turn'
+// (JSON [{urls,username,credential},...]).
 let _extraTurn = [];
 try { const s = localStorage.getItem('pool_turn'); if (s) _extraTurn = JSON.parse(s); } catch(_){}
 const PEER_OPTS = {
@@ -801,9 +801,13 @@ const PEER_OPTS = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
-      { urls: 'stun:freestun.net:3478' },
-      { urls: 'turn:freestun.net:3478', username: 'free', credential: 'free' },
+      { urls: 'stun:stun.relay.metered.ca:80' },
+      // Metered TURN relays — UDP:80, TCP:80, UDP:443, and TLS(turns):443?tcp so we
+      // can punch through even strict corporate/mobile firewalls that only allow 443.
+      { urls: 'turn:global.relay.metered.ca:80', username: '73461cd7396dfd5c265669fe', credential: 'FjDNgQB1vOTKKMAV' },
+      { urls: 'turn:global.relay.metered.ca:80?transport=tcp', username: '73461cd7396dfd5c265669fe', credential: 'FjDNgQB1vOTKKMAV' },
+      { urls: 'turn:global.relay.metered.ca:443', username: '73461cd7396dfd5c265669fe', credential: 'FjDNgQB1vOTKKMAV' },
+      { urls: 'turns:global.relay.metered.ca:443?transport=tcp', username: '73461cd7396dfd5c265669fe', credential: 'FjDNgQB1vOTKKMAV' },
       ...(_extraTurn || []),
     ],
   },
