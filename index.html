@@ -499,15 +499,17 @@ function freshState() {
       balls.push({ n, x, y, vx:0, vy:0, alive:true });
     }
   }
+  // Randomize who breaks so it isn't always the host (P0).
+  const first = Math.random() < 0.5 ? 0 : 1;
   return {
     balls,
-    turn: 0,                 // whose turn (0/1)
+    turn: first,             // whose turn (0/1) — randomized break
     phase: 'aim',            // 'aim' | 'sim' | 'over'
     broken: false,
     open: true,              // groups not yet assigned
     groups: [null, null],    // 'solid'|'stripe' per player
     ballInHand: false,
-    message: 'Break!',
+    message: (first===0?'P1':'P2') + ' breaks!',
     winner: null,
     // per-shot bookkeeping (host only)
     shot: null,
@@ -1306,30 +1308,30 @@ function releaseCharge(){
   if (!G || !aim.charging) return;
   aim.charging = false;
   if (aim.power > 0.4 && myTurn()){
-    if (role === 'host') hostHandleShot(aim.angle, aim.power, 0, spin.sx, spin.sy);
-    else if (conn && conn.open){
-      conn.send({ t:'shot', angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy });
-      // Client prediction lock: the host won't flip our local G.phase until its next
-      // snapshot returns (tens of ms over WebRTC). Optimistically mark 'sim' now so
-      // myTurn() is false and we can't re-charge / send a phantom second shot in the gap.
-      // applyState() overwrites G wholesale when the authoritative state arrives.
-      G.phase = 'sim';
-      // Watchdog: if the host never streams a snapshot back (shot packet dropped, or
-      // the host rejected it before our resync reply could arrive), we'd be frozen in
-      // 'sim' forever — no input accepted, no physics on the guest. After a grace
-      // window, re-send the shot once and (failing a reply) revert to 'aim' so the
-      // player is never permanently stuck and can retry.
-      const shotMsg = { t:'shot', angle: aim.angle, power: aim.power, sx: spin.sx, sy: spin.sy };
-      armPredictWatchdog(shotMsg);
-    }
-    aim.power = 0; aim.active = false;
-    setSpin(0,0);          // per-shot UI reset — match the host-cleared server state
-    sendAim();
+    fireShot(aim.angle, aim.power, spin.sx, spin.sy);
   } else {
     // Released at/near a trough — cancel, no shot.
     aim.power = 0; aim.active = false;
     sendAim();
   }
+}
+
+// Commit a shot (host applies directly; guest predicts + sends with a watchdog).
+// Shared by the normal release path and the autoaim cheat.
+function fireShot(angle, power, sx, sy){
+  if (!myTurn()) return;
+  sx = sx||0; sy = sy||0;
+  if (role === 'host') hostHandleShot(angle, power, 0, sx, sy);
+  else if (conn && conn.open){
+    conn.send({ t:'shot', angle, power, sx, sy });
+    // Client prediction lock (see pointerUp): mark 'sim' locally so we can't double-fire
+    // in the round-trip gap; a watchdog reverts us if the host never replies.
+    G.phase = 'sim';
+    armPredictWatchdog({ t:'shot', angle, power, sx, sy });
+  }
+  aim.power = 0; aim.active = false; aim.charging = false;
+  setSpin(0,0);
+  sendAim();
 }
 
 function pointerUp(e){
@@ -1376,6 +1378,82 @@ window.addEventListener('blur', () => {
   aim.charging = false;
   aim.power = 0; aim.active = false;
   sendAim();
+});
+
+// =========================================================================
+// CHEAT: autoaim + pot (press "A"). Finds the legal target ball with the clearest
+// straight pot into a pocket, aims the cue at the required "ghost ball" contact
+// point, and fires at a power scaled to the distance. Only fires on your own turn.
+// =========================================================================
+function myLegalTargets(){
+  // which numbers may I legally hit first?
+  const mine = [];
+  const g = G.groups[myPlayer];
+  for (const b of G.balls){
+    if (!b.alive || b.n===0) continue;
+    if (G.open){ if (b.n!==8) mine.push(b); }              // open table: any non-8
+    else if (g){
+      const grp = isStripe(b.n)?'stripe':'solid';
+      if (grp===g) mine.push(b);
+    }
+  }
+  // if my group is cleared (or I somehow have none), the 8 is the target
+  if (!mine.length){ const eight=G.balls.find(b=>b.n===8&&b.alive); if (eight) mine.push(eight); }
+  return mine;
+}
+// is the straight segment from (x0,y0)->(x1,y1) clear of other balls (excluding ex)?
+function pathClear(x0,y0,x1,y1,exclude){
+  const dx=x1-x0, dy=y1-y0, len=Math.hypot(dx,dy)||1; const ux=dx/len, uy=dy/len;
+  for (const b of G.balls){
+    if (!b.alive || b===exclude || b.n===0) continue;
+    // distance from b center to the segment
+    const t=Math.max(0,Math.min(len,(b.x-x0)*ux+(b.y-y0)*uy));
+    const cx=x0+ux*t, cy=y0+uy*t;
+    if (Math.hypot(b.x-cx,b.y-cy) < 2*R-1) return false;
+  }
+  return true;
+}
+function autoAimPot(){
+  if (!myTurn() || G.ballInHand) return false;
+  const cb = cueBall(); if (!cb || !cb.alive) return false;
+  let best=null;
+  for (const t of myLegalTargets()){
+    for (const p of POCKETS){
+      // direction the object ball must travel to reach the pocket
+      let tpx=p.x-t.x, tpy=p.y-t.y; const tpl=Math.hypot(tpx,tpy)||1; tpx/=tpl; tpy/=tpl;
+      // ghost-ball position: cue center at contact sits 2R behind the object ball,
+      // opposite the pocket direction.
+      const gx=t.x - tpx*2*R, gy=t.y - tpy*2*R;
+      // cue must be able to travel from its center to the ghost point
+      let cdx=gx-cb.x, cdy=gy-cb.y; const cdl=Math.hypot(cdx,cdy)||1; cdx/=cdl; cdy/=cdl;
+      // the pocket must be on the far side (cut angle < ~80°), else it's impossible
+      const cut = cdx*tpx + cdy*tpy;
+      if (cut < 0.18) continue;                          // too thin a cut to pot
+      // both legs must be clear: cue->ghost and object->pocket
+      if (!pathClear(cb.x,cb.y,gx,gy,t)) continue;
+      if (!pathClear(t.x,t.y,p.x,p.y,t)) continue;
+      // score: prefer straighter cuts and shorter object->pocket distance
+      const score = cut - tpl/2000;
+      if (!best || score>best.score){
+        best = { score, angle:Math.atan2(gy-cb.y,gx-cb.x), dist:cdl+tpl };
+      }
+    }
+  }
+  if (!best) return false;
+  // power scaled to total distance, clamped to a sane potting range
+  const power = Math.max(6, Math.min(MAX_POWER*0.85, 5 + best.dist/70));
+  aim.angle = best.angle;
+  setSpin(0,0);
+  fireShot(best.angle, power, 0, 0);
+  setStatus('🎯 Autoaim: potting shot fired!');
+  return true;
+}
+window.addEventListener('keydown', e => {
+  if (e.repeat) return;
+  // "A" = autoaim cheat. Ignore while typing in the room-code field.
+  if ((e.key==='a' || e.key==='A') && document.activeElement !== document.getElementById('codeIn')){
+    if (autoAimPot()) e.preventDefault();
+  }
 });
 
 function sendAim(){
@@ -1504,103 +1582,119 @@ function hostHandleShot(angle, power, fromPlayer, sx, sy){
   G._guestAim = null;
 }
 
+// Resolve one ball-ball contact: separate the overlap and exchange momentum along
+// the contact normal (equal-mass elastic). Also applies cue spin once per shot.
+function resolveBallContact(a, b){
+  let dx=b.x-a.x, dy=b.y-a.y, dist=Math.hypot(dx,dy);
+  if (dist===0){ dx=1; dy=0; dist=0.0001; }        // exactly coincident — nudge apart
+  const nx=dx/dist, ny=dy/dist;
+  // positional separation so they never sink into each other
+  const overlap = 2*R - dist;
+  if (overlap > 0){ a.x -= nx*overlap/2; a.y -= ny*overlap/2; b.x += nx*overlap/2; b.y += ny*overlap/2; }
+  // record first ball the cue touches (for foul rules)
+  if (G.shot && G.shot.firstHit==null){
+    if (a.n===0) G.shot.firstHit=b.n; else if (b.n===0) G.shot.firstHit=a.n;
+  }
+  // relative velocity along the normal
+  const dvx=b.vx-a.vx, dvy=b.vy-a.vy;
+  const rel = dvx*nx + dvy*ny;
+  if (rel < 0){
+    // equal-mass elastic: swap the normal components, tangential components untouched
+    // (with a tiny restitution <1 so stacked balls settle instead of jittering).
+    const e = 0.98, j = -(1+e) * rel / 2;
+    a.vx -= j*nx; a.vy -= j*ny;
+    b.vx += j*nx; b.vy += j*ny;
+    if (-rel > 0.4) emitSound('clack', Math.min(1, -rel/MAX_POWER));
+    // ---- spin / english (cue ball only, once per shot) ----
+    if (G.shot && !G.shot.spinApplied && (a.n===0) !== (b.n===0)){
+      const cue = (a.n===0) ? a : b, s = G.shot;
+      const k = 0.18 * (s.power || 0);
+      cue.vx += s.dirX * s.spinY * k; cue.vy += s.dirY * s.spinY * k;
+      const perpX=-s.dirY, perpY=s.dirX, sk=0.12*(s.power||0)*s.spinX;
+      cue.vx += perpX*sk; cue.vy += perpY*sk;
+      const sp=Math.hypot(cue.vx,cue.vy), cap=MAX_POWER*1.2;
+      if (sp>cap){ const f=cap/sp; cue.vx*=f; cue.vy*=f; }
+      s.spinApplied = true;
+    }
+  }
+}
+
 // advance physics one frame; returns true while balls still moving
 function stepPhysics(){
   let moving = false;
-  // Scale substeps to the fastest ball so no ball travels more than ~R per substep
-  // (prevents tunneling through balls/cushions on hard breaks).
+  const live = G.balls.filter(b => b.alive);
+  // Substep count scaled to the fastest ball so no ball travels more than ~R/4 per
+  // substep — combined with the swept test below this makes fast grazing hits reliable.
   let maxSpeed = 0;
-  for (const b of G.balls){ if (b.alive){ const sp=Math.hypot(b.vx,b.vy); if (sp>maxSpeed) maxSpeed=sp; } }
-  const steps = Math.max(SUBSTEPS, Math.ceil(maxSpeed / (R*0.5)));
+  for (const b of live){ const sp=Math.hypot(b.vx,b.vy); if (sp>maxSpeed) maxSpeed=sp; }
+  const steps = Math.max(SUBSTEPS, Math.ceil(maxSpeed / (R*0.25)));
+  const dt = 1/steps;
+
   for (let s=0; s<steps; s++){
-    // integrate
-    for (const b of G.balls){
-      if (!b.alive) continue;
-      b.x += b.vx / steps;
-      b.y += b.vy / steps;
+    // --- continuous (swept) ball-ball collision within this substep ---
+    // For every pair, solve for the earliest time-of-impact t in [0,dt] where the
+    // gap between centers first reaches 2R, using relative motion. This catches
+    // fast/grazing contacts that endpoint-overlap checks miss ("won't collide" bug).
+    for (let i=0;i<live.length;i++){
+      const a=live[i]; if(!a.alive) continue;
+      for (let j=i+1;j<live.length;j++){
+        const b=live[j]; if(!b.alive) continue;
+        const rx=b.x-a.x, ry=b.y-a.y;               // relative position
+        const rvx=(b.vx-a.vx), rvy=(b.vy-a.vy);     // relative velocity (per frame)
+        // already overlapping/touching this substep? resolve immediately.
+        const curDist=Math.hypot(rx,ry);
+        if (curDist < 2*R){ resolveBallContact(a,b); continue; }
+        // quadratic: |r + rv*t*dt|^2 = (2R)^2
+        const A = (rvx*rvx+rvy*rvy)*dt*dt;
+        if (A <= 1e-9) continue;                    // not closing
+        const Bc = 2*(rx*rvx+ry*rvy)*dt;
+        const C = rx*rx+ry*ry - (2*R)*(2*R);
+        const disc = Bc*Bc - 4*A*C;
+        if (disc < 0) continue;                     // paths never reach contact
+        const t = (-Bc - Math.sqrt(disc)) / (2*A);  // earliest root
+        if (t >= 0 && t <= 1){
+          // advance both to the exact contact point, resolve, leave remaining motion
+          // for the normal integrate step below.
+          a.x += a.vx*dt*t; a.y += a.vy*dt*t;
+          b.x += b.vx*dt*t; b.y += b.vy*dt*t;
+          resolveBallContact(a,b);
+        }
+      }
     }
-    // cushions
-    for (const b of G.balls){
+    // --- integrate positions ---
+    for (const b of live){
       if (!b.alive) continue;
-      let hit=false;
-      const preSpeed = Math.hypot(b.vx, b.vy);
-      if (b.x < RAIL+R){ b.x=RAIL+R; b.vx=-b.vx; hit=true; }
-      if (b.x > W-RAIL-R){ b.x=W-RAIL-R; b.vx=-b.vx; hit=true; }
-      if (b.y < RAIL+R){ b.y=RAIL+R; b.vy=-b.vy; hit=true; }
-      if (b.y > H-RAIL-R){ b.y=H-RAIL-R; b.vy=-b.vy; hit=true; }
+      b.x += b.vx*dt; b.y += b.vy*dt;
+    }
+    // --- cushions ---
+    for (const b of live){
+      if (!b.alive) continue;
+      let hit=false; const preSpeed=Math.hypot(b.vx,b.vy);
+      if (b.x < RAIL+R){ b.x=RAIL+R; b.vx=-b.vx*0.92; hit=true; }   // slight energy loss off rails
+      if (b.x > W-RAIL-R){ b.x=W-RAIL-R; b.vx=-b.vx*0.92; hit=true; }
+      if (b.y < RAIL+R){ b.y=RAIL+R; b.vy=-b.vy*0.92; hit=true; }
+      if (b.y > H-RAIL-R){ b.y=H-RAIL-R; b.vy=-b.vy*0.92; hit=true; }
       if (hit){
         if (G.shot && G.shot.firstHit!=null) G.shot.railAfterContact = true;
         if (preSpeed > 0.6) emitSound('cushion', Math.min(1, preSpeed/MAX_POWER));
       }
     }
-    // ball-ball collisions
-    for (let i=0;i<G.balls.length;i++){
-      const a=G.balls[i]; if(!a.alive) continue;
-      for (let j=i+1;j<G.balls.length;j++){
-        const b=G.balls[j]; if(!b.alive) continue;
-        let dx=b.x-a.x, dy=b.y-a.y, dist=Math.hypot(dx,dy);
-        if (dist>0 && dist < 2*R){
-          // record first ball the cue touches
-          if (G.shot && G.shot.firstHit==null){
-            if (a.n===0) G.shot.firstHit=b.n;
-            else if (b.n===0) G.shot.firstHit=a.n;
-          }
-          const nx=dx/dist, ny=dy/dist;
-          const overlap = 2*R - dist;
-          a.x -= nx*overlap/2; a.y -= ny*overlap/2;
-          b.x += nx*overlap/2; b.y += ny*overlap/2;
-          // 1D elastic exchange along normal (equal mass)
-          const dvx=b.vx-a.vx, dvy=b.vy-a.vy;
-          const rel = dvx*nx + dvy*ny;
-          if (rel < 0){
-            a.vx += rel*nx; a.vy += rel*ny;
-            b.vx -= rel*nx; b.vy -= rel*ny;
-            if (-rel > 0.5) emitSound('clack', Math.min(1, -rel/MAX_POWER));  // impact loudness from closing speed
-            // ---- spin / english (cue ball only, once per shot) ----
-            // Apply on the first momentum-exchanging contact between the cue
-            // ball and an object ball. Modifies ONLY the cue ball's velocity.
-            if (G.shot && !G.shot.spinApplied && (a.n===0 || b.n===0) && (a.n!==0 || b.n!==0)){
-              const cue = (a.n===0) ? a : b;
-              const s = G.shot;
-              // follow(+)/draw(-): add longitudinal velocity along shot direction
-              const k = 0.18 * (s.power || 0);
-              cue.vx += s.dirX * s.spinY * k;
-              cue.vy += s.dirY * s.spinY * k;
-              // side english: add a LATERAL kick perpendicular to the shot
-              // direction, scaled by power. Done as a velocity add (not a
-              // rotation of the post-contact velocity) so it still biases the
-              // cue's path on dead-straight shots where the cue transferred
-              // essentially all of its velocity to the object ball and the
-              // surviving velocity is ~0 (rotating ~0 would do nothing).
-              const perpX = -s.dirY, perpY = s.dirX;
-              const sk = 0.12 * (s.power || 0) * s.spinX;
-              cue.vx += perpX * sk;
-              cue.vy += perpY * sk;
-              // stability clamp: never let spin launch the cue past sane bounds
-              const sp = Math.hypot(cue.vx, cue.vy), cap = MAX_POWER*1.2;
-              if (sp > cap){ const f = cap/sp; cue.vx *= f; cue.vy *= f; }
-              s.spinApplied = true;
-            }
-          }
-        }
-      }
-    }
-    // pockets
-    for (const b of G.balls){
+    // --- pockets ---
+    for (const b of live){
       if (!b.alive) continue;
       for (const p of POCKETS){
         if (Math.hypot(b.x-p.x, b.y-p.y) < POCKET){
           b.alive=false; b.vx=b.vy=0;
-          if (b.n===0) G.shot.cueScratch=true;
-          else G.shot.potted.push(b.n);
+          if (b.n===0) G.shot.cueScratch=true; else G.shot.potted.push(b.n);
           emitSound('pocket', 0.8);
           break;
         }
       }
     }
   }
-  // friction + stop check
-  for (const b of G.balls){
+  // Rolling friction (per frame, not per substep) + stop threshold. Real balls roll
+  // a long way then settle, so a light damping reads more natural than heavy drag.
+  for (const b of live){
     if (!b.alive) continue;
     b.vx*=FRICTION; b.vy*=FRICTION;
     if (Math.hypot(b.vx,b.vy) < STOP){ b.vx=0; b.vy=0; }
