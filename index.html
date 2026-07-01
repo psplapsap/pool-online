@@ -305,8 +305,9 @@ const W = 900, H = 500;
 const RAIL = 36;                 // playable inset from canvas edge to cushion
 const R = 11;                    // ball radius
 const POCKET = 19;               // pocket capture radius
-const FRICTION = 0.988;          // per-frame velocity damping
-const STOP = 0.16;               // speed below which a ball is considered stopped (higher = settles sooner)
+const FRICTION = 0.985;          // per-frame rolling damping — tuned so a medium hit rolls
+                                 // most of the table (~640px) then eases to rest in ~3.5s
+const STOP = 0.4;                // speed below which a ball is parked (kills the slow crawl)
 const MAX_POWER = 17;            // max launch speed
 const SUBSTEPS = 3;              // physics substeps per frame for stability
 const CHARGE_HALF_MS = 1200;    // 1.2s per half-sweep (2.4s full 0->MAX->0 cycle)
@@ -1414,55 +1415,83 @@ function pathClear(x0,y0,x1,y1,exclude){
   }
   return true;
 }
+// Deep-ish clone of the physics-relevant state so we can simulate candidate shots
+// without touching the live game.
+function cloneSimState(){
+  return { balls: G.balls.map(b => ({ n:b.n, x:b.x, y:b.y, vx:b.vx, vy:b.vy, alive:b.alive })),
+           shot:{ firstHit:null, potted:[], cueScratch:false, spinApplied:true }, potted:[] };
+}
+// Run a full shot in a SANDBOX (same physics as the real game) and report whether the
+// given target ball was potted and whether the cue scratched. This is the key to a
+// reliable autoaim: instead of trusting geometry, we actually play the shot out.
+function simulateShot(angle, power, targetN){
+  const saved = G;
+  const sim = cloneSimState();
+  G = sim;                                   // stepPhysics reads/writes the global G
+  const cb = sim.balls.find(b => b.n===0);
+  cb.vx = Math.cos(angle)*power; cb.vy = Math.sin(angle)*power;
+  let frames = 0, potted = false, scratch = false;
+  while (stepPhysics() && frames < 1500){
+    frames++;
+    if (sim.shot.potted.includes(targetN)) potted = true;
+    if (sim.shot.cueScratch) scratch = true;
+  }
+  if (sim.shot.potted.includes(targetN)) potted = true;
+  if (sim.shot.cueScratch) scratch = true;
+  G = saved;                                 // restore the real game
+  return { potted, scratch };
+}
 function autoAimPot(){
   if (!myTurn() || G.ballInHand) return false;
   const cb = cueBall(); if (!cb || !cb.alive) return false;
   let best=null;
+  // For each legal target × pocket, compute the geometric ghost-ball aim, then VERIFY
+  // it by simulating the real shot. Search a few power levels and tiny angle nudges so
+  // we find one that genuinely pots (and preferably doesn't scratch).
   for (const t of myLegalTargets()){
     for (const p of POCKETS){
-      // direction the object ball must travel to reach the pocket
       let tpx=p.x-t.x, tpy=p.y-t.y; const tpl=Math.hypot(tpx,tpy)||1; tpx/=tpl; tpy/=tpl;
-      // ghost-ball position: cue center at contact sits 2R behind the object ball,
-      // opposite the pocket direction.
       const gx=t.x - tpx*2*R, gy=t.y - tpy*2*R;
-      // cue must be able to travel from its center to the ghost point
-      let cdx=gx-cb.x, cdy=gy-cb.y; const cdl=Math.hypot(cdx,cdy)||1; cdx/=cdl; cdy/=cdl;
-      // the pocket must be on the far side (cut angle < ~80°), else it's impossible
-      const cut = cdx*tpx + cdy*tpy;
-      if (cut < 0.18) continue;                          // too thin a cut to pot
-      // both legs must be clear: cue->ghost and object->pocket
+      let cdx=gx-cb.x, cdy=gy-cb.y; const cdl=Math.hypot(cdx,cdy)||1;
+      const cut = (cdx/cdl)*tpx + (cdy/cdl)*tpy;
+      if (cut < 0.30) continue;                          // skip near-impossible thin cuts
       if (!pathClear(cb.x,cb.y,gx,gy,t)) continue;
       if (!pathClear(t.x,t.y,p.x,p.y,t)) continue;
-      // score: prefer straighter cuts and shorter object->pocket distance
-      const score = cut - tpl/2000;
-      if (!best || score>best.score){
-        best = { score, angle:Math.atan2(gy-cb.y,gx-cb.x), dist:cdl+tpl };
+      const baseAngle = Math.atan2(gy-cb.y, gx-cb.x);
+      const basePower = Math.max(7, Math.min(MAX_POWER*0.9, 6 + (cdl+tpl)/60));
+      // verify with a small search: angle nudges × power options
+      for (const dA of [0, -0.012, 0.012, -0.024, 0.024]){
+        for (const pw of [basePower, Math.min(MAX_POWER*0.9, basePower+3), Math.max(6, basePower-2)]){
+          const r = simulateShot(baseAngle+dA, pw, t.n);
+          if (r.potted){
+            // score: pots that don't scratch and use straighter cuts win
+            const score = (r.scratch ? 0 : 100) + cut*10 - tpl/500;
+            if (!best || score>best.score) best = { score, angle:baseAngle+dA, power:pw, scratch:r.scratch };
+          }
+        }
+        if (best && !best.scratch && Math.abs(dA)<0.001) break; // straight-on clean pot: take it
       }
     }
   }
-  if (!best) return false;
-  // power scaled to total distance, clamped to a sane potting range
-  const power = Math.max(6, Math.min(MAX_POWER*0.85, 5 + best.dist/70));
-  // SIMULATE A PLAYER (模拟玩家动作): don't teleport-fire. Point the cue at the target,
-  // then visibly "charge" the power meter up to the computed value over ~0.5s (the same
-  // aim line + power bar a human would see), and release. Looks like a real aim+shot.
+  if (!best) { setStatus('🎯 Autoaim: no clear pot available — try repositioning.'); return false; }
+  // SIMULATE A PLAYER (模拟玩家动作): point the cue, visibly ramp the power meter over
+  // ~0.5s, then release — rather than teleport-firing. Uses the verified angle/power.
   setSpin(0,0);
-  aim.angle = best.angle;
-  aim.active = true;
-  aim.charging = false;         // we drive power manually, not via the oscillator
-  aim.power = 0;
+  aim.angle = best.angle; aim.active = true; aim.charging = false; aim.power = 0;
   sendAim();
-  const t0 = performance.now(), rampMs = 550;
+  const t0 = performance.now(), rampMs = 500;
+  let fired = false;
   const anim = () => {
-    if (!myTurn()){ aim.active=false; aim.power=0; return; }   // turn changed — abort
+    if (!myTurn() || G.phase !== 'aim'){ aim.active=false; aim.power=0; return; }
     const f = Math.min(1, (performance.now()-t0)/rampMs);
-    aim.angle = best.angle;                                    // hold the aim
-    aim.power = power * f;                                     // ramp the visible meter
+    aim.angle = best.angle;                 // hold the verified aim (ignore mouse)
+    aim.power = best.power * f;
     sendAim();
     if (f < 1){ requestAnimationFrame(anim); }
-    else { fireShot(best.angle, power, 0, 0); }               // release
+    else if (!fired){ fired = true; fireShot(best.angle, best.power, 0, 0); }
   };
   requestAnimationFrame(anim);
+  setStatus('🎯 Autoaim: lining up a pot…');
   return true;
 }
 // Hidden cheat trigger: a discreet key SEQUENCE (type "pot") rather than a single
@@ -1623,9 +1652,9 @@ function resolveBallContact(a, b){
   const dvx=b.vx-a.vx, dvy=b.vy-a.vy;
   const rel = dvx*nx + dvy*ny;
   if (rel < 0){
-    // equal-mass elastic: swap the normal components, tangential components untouched
-    // (with a tiny restitution <1 so stacked balls settle instead of jittering).
-    const e = 0.98, j = -(1+e) * rel / 2;
+    // equal-mass elastic: crisp momentum transfer along the normal (restitution ~1,
+    // like real phenolic balls); tangential components untouched.
+    const e = 0.99, j = -(1+e) * rel / 2;
     a.vx -= j*nx; a.vy -= j*ny;
     b.vx += j*nx; b.vy += j*ny;
     if (-rel > 0.4) emitSound('clack', Math.min(1, -rel/MAX_POWER));
@@ -1716,15 +1745,13 @@ function stepPhysics(){
       }
     }
   }
-  // Rolling friction (per frame) + stop threshold. Base damping keeps motion natural,
-  // but we add EXTRA damping at low speed so balls settle quickly instead of crawling
-  // for seconds — that long tail was what made the turn end feel slow.
+  // Rolling friction (per frame). Light so balls carry momentum through the rack and
+  // roll a realistic distance; the STOP threshold parks them once genuinely slow so
+  // there's no multi-second crawl (which made the turn end feel slow).
   for (const b of live){
     if (!b.alive) continue;
     b.vx*=FRICTION; b.vy*=FRICTION;
-    const sp = Math.hypot(b.vx,b.vy);
-    if (sp < 1.2){ b.vx*=0.90; b.vy*=0.90; }   // brisk settle once slow
-    if (sp < STOP){ b.vx=0; b.vy=0; }
+    if (Math.hypot(b.vx,b.vy) < STOP){ b.vx=0; b.vy=0; }
     else moving = true;
   }
   return moving;
