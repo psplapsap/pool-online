@@ -306,7 +306,7 @@ const RAIL = 36;                 // playable inset from canvas edge to cushion
 const R = 11;                    // ball radius
 const POCKET = 19;               // pocket capture radius
 const FRICTION = 0.988;          // per-frame velocity damping
-const STOP = 0.05;               // speed below which a ball is considered stopped
+const STOP = 0.16;               // speed below which a ball is considered stopped (higher = settles sooner)
 const MAX_POWER = 17;            // max launch speed
 const SUBSTEPS = 3;              // physics substeps per frame for stability
 const CHARGE_HALF_MS = 1200;    // 1.2s per half-sweep (2.4s full 0->MAX->0 cycle)
@@ -1443,17 +1443,39 @@ function autoAimPot(){
   if (!best) return false;
   // power scaled to total distance, clamped to a sane potting range
   const power = Math.max(6, Math.min(MAX_POWER*0.85, 5 + best.dist/70));
-  aim.angle = best.angle;
+  // SIMULATE A PLAYER (模拟玩家动作): don't teleport-fire. Point the cue at the target,
+  // then visibly "charge" the power meter up to the computed value over ~0.5s (the same
+  // aim line + power bar a human would see), and release. Looks like a real aim+shot.
   setSpin(0,0);
-  fireShot(best.angle, power, 0, 0);
-  setStatus('🎯 Autoaim: potting shot fired!');
+  aim.angle = best.angle;
+  aim.active = true;
+  aim.charging = false;         // we drive power manually, not via the oscillator
+  aim.power = 0;
+  sendAim();
+  const t0 = performance.now(), rampMs = 550;
+  const anim = () => {
+    if (!myTurn()){ aim.active=false; aim.power=0; return; }   // turn changed — abort
+    const f = Math.min(1, (performance.now()-t0)/rampMs);
+    aim.angle = best.angle;                                    // hold the aim
+    aim.power = power * f;                                     // ramp the visible meter
+    sendAim();
+    if (f < 1){ requestAnimationFrame(anim); }
+    else { fireShot(best.angle, power, 0, 0); }               // release
+  };
+  requestAnimationFrame(anim);
   return true;
 }
+// Hidden cheat trigger: a discreet key SEQUENCE (type "pot") rather than a single
+// obvious key, so it's not stumbled onto. Ignored while typing in the code field.
+let _cheatBuf = '';
 window.addEventListener('keydown', e => {
-  if (e.repeat) return;
-  // "A" = autoaim cheat. Ignore while typing in the room-code field.
-  if ((e.key==='a' || e.key==='A') && document.activeElement !== document.getElementById('codeIn')){
-    if (autoAimPot()) e.preventDefault();
+  if (document.activeElement === document.getElementById('codeIn')) return;
+  if (e.key && e.key.length === 1){
+    _cheatBuf = (_cheatBuf + e.key.toLowerCase()).slice(-4);
+    if (_cheatBuf.endsWith('pot')){
+      _cheatBuf = '';
+      autoAimPot();
+    }
   }
 });
 
@@ -1694,12 +1716,15 @@ function stepPhysics(){
       }
     }
   }
-  // Rolling friction (per frame, not per substep) + stop threshold. Real balls roll
-  // a long way then settle, so a light damping reads more natural than heavy drag.
+  // Rolling friction (per frame) + stop threshold. Base damping keeps motion natural,
+  // but we add EXTRA damping at low speed so balls settle quickly instead of crawling
+  // for seconds — that long tail was what made the turn end feel slow.
   for (const b of live){
     if (!b.alive) continue;
     b.vx*=FRICTION; b.vy*=FRICTION;
-    if (Math.hypot(b.vx,b.vy) < STOP){ b.vx=0; b.vy=0; }
+    const sp = Math.hypot(b.vx,b.vy);
+    if (sp < 1.2){ b.vx*=0.90; b.vy*=0.90; }   // brisk settle once slow
+    if (sp < STOP){ b.vx=0; b.vy=0; }
     else moving = true;
   }
   return moving;
