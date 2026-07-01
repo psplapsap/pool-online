@@ -310,6 +310,7 @@ const STOP = 0.05;               // speed below which a ball is considered stopp
 const MAX_POWER = 17;            // max launch speed
 const SUBSTEPS = 3;              // physics substeps per frame for stability
 const CHARGE_HALF_MS = 1200;    // 1.2s per half-sweep (2.4s full 0->MAX->0 cycle)
+const TURN_SECONDS = 20;        // per-turn shot clock; turn is skipped if it hits 0
 
 // Triangle-wave power: holding the mouse sweeps power 0 -> MAX_POWER -> 0 forever.
 // Pure helper so it is trivially unit-testable.
@@ -1565,6 +1566,7 @@ function hostHandleShot(angle, power, fromPlayer, sx, sy){
   cb.vx = Math.cos(angle) * power;
   cb.vy = Math.sin(angle) * power;
   emitSound('cue', power / MAX_POWER);   // cue-stick strike, louder on harder shots
+  _turnShotCtr++;                        // a shot was taken → next aim turn gets a fresh 20s clock
   G.phase = 'sim';
   G.shot = {
     firstHit: null,       // number of first ball cue contacted
@@ -1814,6 +1816,39 @@ function groupCleared(g){
 // =========================================================================
 // MAIN LOOP
 // =========================================================================
+// Host-authoritative 20s shot clock. Counts down only during the aim phase; resets
+// whenever the aiming turn changes (new player, or same player's next shot after a
+// sim). When it hits 0 the turn is skipped (passed to the opponent, ball-in-hand
+// stays as-is). The remaining seconds ride along in G (G.timeLeft) so both screens
+// show the same countdown. Uses wall-clock delta so it's frame-rate independent.
+let _turnClockKey = null;      // identifies the current aiming turn ("turn:phase:shotCount")
+let _turnClockStart = 0;       // performance.now() when this turn's clock started
+let _turnShotCtr = 0;          // bumped each time a shot fires, so consecutive same-player turns reset
+function hostTickTurnClock(){
+  if (!G){ return; }
+  if (G.phase !== 'aim'){ G.timeLeft = TURN_SECONDS; return; }   // clock only runs while aiming
+  const key = G.turn + ':' + _turnShotCtr;
+  if (key !== _turnClockKey){
+    _turnClockKey = key;
+    _turnClockStart = performance.now();
+  }
+  const elapsed = (performance.now() - _turnClockStart) / 1000;
+  const left = Math.max(0, TURN_SECONDS - elapsed);
+  G.timeLeft = left;
+  if (left <= 0){
+    // Time's up — skip this player's turn. Don't grant ball-in-hand (a skip isn't a
+    // foul in this simple ruleset); just hand the table to the opponent.
+    const opp = 1 - G.turn;
+    G.turn = opp;
+    G.ballInHand = false;
+    G.timeLeft = TURN_SECONDS;
+    G.message = 'Time! ' + (opp===0?'P1':'P2') + '\'s turn';
+    _turnShotCtr++;                 // force a fresh clock key next frame
+    emitSound('cushion', 0.4);      // subtle audible cue
+    renderHud(); sendState();
+  }
+}
+
 let _aimStreamCtr = 0;
 function loop(){
   if (G){
@@ -1837,6 +1872,7 @@ function loop(){
       streamState();            // stream positions (and sound events) to guest
       if (!moving) resolveShot();
     }
+    if (role === 'host') hostTickTurnClock();   // authoritative 20s shot clock
     renderHud();   // keep both players' HUD (turn pills, message, "your shot") live every frame
     draw();
   }
@@ -2145,8 +2181,16 @@ function renderHud(){
   p2.classList.toggle('you', myPlayer===1);
   p1.classList.toggle('active', G.turn===0);
   p2.classList.toggle('active', G.turn===1);
-  document.getElementById('turnmsg').textContent =
-    G.message + (G.turn===myPlayer && G.phase==='aim' ? '  (your shot)' : '');
+  // Shot clock: show the remaining seconds during the aim phase, with an urgent
+  // tint under 6s. G.timeLeft is set authoritatively by the host and streamed.
+  let clock = '';
+  if (G.phase === 'aim' && typeof G.timeLeft === 'number'){
+    const secs = Math.ceil(G.timeLeft);
+    clock = '  ⏱ ' + secs + 's';
+  }
+  const tm = document.getElementById('turnmsg');
+  tm.textContent = G.message + (G.turn===myPlayer && G.phase==='aim' ? '  (your shot)' : '') + clock;
+  tm.style.color = (G.phase==='aim' && typeof G.timeLeft==='number' && G.timeLeft <= 6) ? '#ff6b6b' : '';
 }
 </script>
 </body>
